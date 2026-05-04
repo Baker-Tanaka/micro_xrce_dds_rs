@@ -1,8 +1,16 @@
-/// CDR Little Endian serializer for ROS2 DDS messages.
+/// CDR Little Endian serializer for ROS2 DDS message *bodies* (field data only).
 ///
-/// Alignment follows the CDR standard: each scalar is aligned to its own size.
-/// Alignment is computed from byte 0 of the entire buffer (including the 4-byte
-/// encapsulation header written by `header()`).
+/// **Do not** include the 4-byte CDR encapsulation header (`00 01 00 00`) when
+/// publishing through `XrceSession::write_data` — Fast-DDS adds it when it
+/// builds the SerializedPayload. Doubling the encap silently breaks
+/// deserialization (`ros2 topic echo` will show nothing while `--raw` reveals
+/// two encap headers in a row). The legacy `header()` method is kept for
+/// edge cases that handle the SerializedPayload manually; the standard
+/// `serialize_*` helpers in `ros2::msg::*` no longer call it.
+///
+/// Alignment follows the CDR standard: each scalar is aligned to its own size,
+/// computed from byte 0 of the buffer (which is the start of the body when no
+/// encap header is written).
 pub struct CdrWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
@@ -14,7 +22,10 @@ impl<'a> CdrWriter<'a> {
     }
 
     /// Write the 4-byte CDR Little Endian encapsulation header.
-    /// Must be called first; establishes the alignment origin.
+    ///
+    /// Provided for callers that own the full SerializedPayload (e.g. raw DDS
+    /// experiments). Do **not** call this when handing the result to
+    /// `XrceSession::write_data` — the agent / Fast-DDS layer adds the encap.
     pub fn header(&mut self) {
         self.raw(&[0x00, 0x01, 0x00, 0x00]);
     }

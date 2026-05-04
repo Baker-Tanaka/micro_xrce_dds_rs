@@ -1,5 +1,14 @@
-use embedded_io_async::{Read, Write};
+//! XRCE-DDS session over a length-prefixed TCP stream.
+//!
+//! Wire format follows eProsima Micro-XRCE-DDS-Client (the format spoken by
+//! `microros/micro-ros-agent`). See `/tenshi-no-hana/.claude/xrce_dds_protocol.md`
+//! for a byte-for-byte reference.
+//!
+//! Reliability: this crate currently uses BEST_EFFORT (stream 0x01) only.
+//! Entity creation waits for STATUS by request_id; WRITE_DATA is fire-and-forget.
+
 use crate::{error::XrceError, framing, protocol::*};
+use embedded_io_async::{Read, Write};
 
 #[cfg(feature = "defmt")]
 use defmt::{debug, error};
@@ -8,23 +17,15 @@ macro_rules! debug { ($($t:tt)*) => {}; }
 #[cfg(not(feature = "defmt"))]
 macro_rules! error { ($($t:tt)*) => {}; }
 
-/// An XRCE-DDS entity ID as packed by the eProsima convention:
-/// upper 12 bits = entity index, lower 4 bits = entity type.
+/// An XRCE-DDS entity ID, in its packed `(idx << 4) | kind` form.
 #[derive(Clone, Copy)]
 pub struct ObjectId(pub u16);
 
-/// Opaque handle returned by `create_datawriter`.
+/// Opaque DataWriter handle — pass to [`XrceSession::write_data`].
 #[derive(Clone, Copy)]
 pub struct DataWriterId(pub u16);
 
 /// Established XRCE-DDS session over a TCP connection to the micro-ROS Agent.
-///
-/// # Transport
-/// Uses TCP framing: each XRCE message is prefixed by a 2-byte LE payload length.
-///
-/// # Reliability
-/// All entity-creation operations use the BEST_EFFORT output stream (stream_id = 0x01)
-/// but wait for a STATUS reply (matched by req_id). WRITE_DATA is fire-and-forget.
 pub struct XrceSession<T: Read + Write> {
     transport: T,
     session_id: u8,
@@ -35,11 +36,35 @@ pub struct XrceSession<T: Read + Write> {
     rx_buf: [u8; 128],
 }
 
+/// Build a CREATE_CLIENT message into `buf`. Returns bytes written (without the
+/// 2-byte TCP framing prefix; pass the slice to [`framing::write_framed`]).
+///
+/// Useful for diagnostic flows that want to send CREATE_CLIENT manually before
+/// constructing a full [`XrceSession`].
+pub fn create_client_msg(buf: &mut [u8], session_id: u8, client_key: &[u8; 4]) -> usize {
+    build_create_client(buf, session_id, client_key, DEFAULT_MTU)
+}
+
+const DEFAULT_MTU: u16 = 512;
+
 impl<T: Read + Write> XrceSession<T> {
-    /// Establish an XRCE-DDS session with the micro-ROS Agent.
-    ///
-    /// Sends CREATE_CLIENT and waits for STATUS_AGENT.
-    /// `session_id` should be in range 0x81–0xFE (with 4-byte client key).
+    /// Reuse an already-handshaken transport. Caller is responsible for having
+    /// completed the CREATE_CLIENT/STATUS_AGENT exchange.
+    pub fn from_connected(transport: T, session_id: u8, client_key: [u8; 4]) -> Self {
+        Self {
+            transport,
+            session_id,
+            client_key,
+            seq: 0,
+            req_id: 1,
+            tx_buf: [0u8; 512],
+            rx_buf: [0u8; 128],
+        }
+    }
+
+    /// Establish a session: CREATE_CLIENT → STATUS_AGENT.
+    /// `session_id` should typically be in `0x81..=0xFE` so the message header
+    /// stays at 4 bytes (no client_key tail).
     pub async fn connect(
         mut transport: T,
         session_id: u8,
@@ -48,15 +73,13 @@ impl<T: Read + Write> XrceSession<T> {
         let mut tx = [0u8; 64];
         let mut rx = [0u8; 128];
 
-        let n = build_create_client(&mut tx, session_id);
+        let n = build_create_client(&mut tx, session_id, &client_key, DEFAULT_MTU);
         debug!("[session] sending CREATE_CLIENT ({} bytes)", n);
         framing::write_framed(&mut transport, &tx[..n]).await?;
-        debug!("[session] CREATE_CLIENT sent, waiting for STATUS_AGENT");
 
         let reply = framing::read_framed(&mut transport, &mut rx).await?;
-        let show = reply.len().min(16);
-        debug!("[session] STATUS_AGENT raw ({} bytes): {=[u8]}", reply.len(), &reply[..show]);
-        parse_status_agent(reply)?;
+        debug!("[session] STATUS_AGENT raw ({} bytes)", reply.len());
+        parse_status_agent(reply, session_id)?;
 
         Ok(Self {
             transport,
@@ -69,85 +92,161 @@ impl<T: Read + Write> XrceSession<T> {
         })
     }
 
-    // ── DDS entity creation ─────────────────────────────────────────────────
+    // ── DDS entity creation ────────────────────────────────────────────────
 
-    /// Create a DDS Participant (the top-level DDS node).
-    pub async fn create_participant(&mut self, name: &str) -> Result<ObjectId, XrceError> {
-        let id = ObjectId(object_id(0x001, ENTITY_PARTICIPANT));
-        let mut xml_buf = [0u8; 128];
-        let xml = fmt_participant_xml(&mut xml_buf, name);
-        self.create_entity(id.0, xml).await?;
-        Ok(id)
+    /// Create a DDS DomainParticipant with the given node name in DDS XML form.
+    ///
+    /// `participant_idx` is a small client-chosen integer that becomes part of
+    /// the ObjectId — typically `1` for a single-node firmware.
+    pub async fn create_participant(
+        &mut self,
+        participant_idx: u16,
+        node_name: &str,
+    ) -> Result<ObjectId, XrceError> {
+        let oid = object_id(participant_idx, ENTITY_PARTICIPANT);
+        let mut xml_buf = [0u8; 192];
+        let xml = fmt_participant_xml(&mut xml_buf, node_name);
+        let req = self.next_req();
+        let seq = self.next_seq();
+        let session_id = self.session_id;
+        let key = self.client_key;
+        let n = encode_create_participant(
+            &mut self.tx_buf,
+            session_id,
+            seq,
+            &key,
+            req,
+            oid,
+            xml,
+            0, // domain_id 0 (matches `ROS_DOMAIN_ID=0`, the agent default)
+        )?;
+        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await?;
+        self.wait_status(req).await?;
+        Ok(ObjectId(oid))
     }
 
-    /// Create a DDS Topic with the given ROS2-style DDS name and type name.
-    ///
-    /// `dds_name`: DDS topic name, e.g. `"rt/angel_nose/temperature"`.
-    /// `type_name`: DDS type name, e.g. `"std_msgs::msg::dds_::Float32_"`.
+    /// Create a DDS Topic referencing a previously-created Participant.
     pub async fn create_topic(
         &mut self,
         topic_idx: u16,
+        participant_idx: u16,
         dds_name: &str,
         type_name: &str,
     ) -> Result<ObjectId, XrceError> {
-        let id = ObjectId(object_id(topic_idx, ENTITY_TOPIC));
+        let oid = object_id(topic_idx, ENTITY_TOPIC);
+        let parent = object_id(participant_idx, ENTITY_PARTICIPANT);
         let mut xml_buf = [0u8; 256];
         let xml = fmt_topic_xml(&mut xml_buf, dds_name, type_name);
-        self.create_entity(id.0, xml).await?;
-        Ok(id)
+        let req = self.next_req();
+        let seq = self.next_seq();
+        let session_id = self.session_id;
+        let key = self.client_key;
+        let n = encode_create_with_parent(
+            &mut self.tx_buf,
+            session_id,
+            seq,
+            &key,
+            req,
+            oid,
+            ENTITY_TOPIC,
+            xml,
+            parent,
+        )?;
+        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await?;
+        self.wait_status(req).await?;
+        Ok(ObjectId(oid))
     }
 
-    /// Create a DDS Publisher (groups DataWriters, one per Participant is enough).
+    /// Create a DDS Publisher under the given Participant.
     pub async fn create_publisher(
         &mut self,
-        pub_idx: u16,
+        publisher_idx: u16,
+        participant_idx: u16,
     ) -> Result<ObjectId, XrceError> {
-        let id = ObjectId(object_id(pub_idx, ENTITY_PUBLISHER));
-        self.create_entity(id.0, "<dds><publisher/></dds>").await?;
-        Ok(id)
+        let oid = object_id(publisher_idx, ENTITY_PUBLISHER);
+        let parent = object_id(participant_idx, ENTITY_PARTICIPANT);
+        let xml = "<dds><publisher><name>MyPublisher</name></publisher></dds>";
+        let req = self.next_req();
+        let seq = self.next_seq();
+        let session_id = self.session_id;
+        let key = self.client_key;
+        let n = encode_create_with_parent(
+            &mut self.tx_buf,
+            session_id,
+            seq,
+            &key,
+            req,
+            oid,
+            ENTITY_PUBLISHER,
+            xml,
+            parent,
+        )?;
+        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await?;
+        self.wait_status(req).await?;
+        Ok(ObjectId(oid))
     }
 
-    /// Create a DDS DataWriter that publishes on the given Topic.
-    ///
-    /// `dw_idx`: unique index for this DataWriter (1-based).
-    /// `dds_name` / `type_name`: must match the Topic created earlier.
+    /// Create a DDS DataWriter under the given Publisher, bound to a Topic.
+    /// `dds_name` and `type_name` must match the Topic.
     pub async fn create_datawriter(
         &mut self,
-        dw_idx: u16,
+        datawriter_idx: u16,
+        publisher_idx: u16,
         dds_name: &str,
         type_name: &str,
     ) -> Result<DataWriterId, XrceError> {
-        let id = object_id(dw_idx, ENTITY_DATAWRITER);
-        let mut xml_buf = [0u8; 256];
+        let oid = object_id(datawriter_idx, ENTITY_DATAWRITER);
+        let parent = object_id(publisher_idx, ENTITY_PUBLISHER);
+        let mut xml_buf = [0u8; 320];
         let xml = fmt_datawriter_xml(&mut xml_buf, dds_name, type_name);
-        self.create_entity(id, xml).await?;
-        Ok(DataWriterId(id))
+        let req = self.next_req();
+        let seq = self.next_seq();
+        let session_id = self.session_id;
+        let key = self.client_key;
+        let n = encode_create_with_parent(
+            &mut self.tx_buf,
+            session_id,
+            seq,
+            &key,
+            req,
+            oid,
+            ENTITY_DATAWRITER,
+            xml,
+            parent,
+        )?;
+        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await?;
+        self.wait_status(req).await?;
+        Ok(DataWriterId(oid))
     }
 
-    // ── Data publishing ─────────────────────────────────────────────────────
+    // ── Data publishing ────────────────────────────────────────────────────
 
-    /// Publish a CDR-serialized message on the given DataWriter (BEST_EFFORT, no reply).
+    /// Publish a CDR-serialized message on the given DataWriter.
+    /// BEST_EFFORT — no STATUS reply.
     pub async fn write_data(
         &mut self,
         dw: DataWriterId,
         cdr_payload: &[u8],
     ) -> Result<(), XrceError> {
-        let n = self.encode_write_data(dw.0, cdr_payload)?;
+        let seq = self.next_seq();
+        let session_id = self.session_id;
+        let key = self.client_key;
+        let n = encode_write_data(
+            &mut self.tx_buf,
+            session_id,
+            seq,
+            &key,
+            dw.0,
+            cdr_payload,
+        )?;
         framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await
     }
 
-    // ── internal ────────────────────────────────────────────────────────────
-
-    async fn create_entity(&mut self, obj_id: u16, xml: &str) -> Result<(), XrceError> {
-        let req = self.next_req();
-        let n = self.encode_create(req, obj_id, xml)?;
-        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await?;
-        self.wait_status(req).await
-    }
+    // ── internal ───────────────────────────────────────────────────────────
 
     async fn wait_status(&mut self, expected_req: u16) -> Result<(), XrceError> {
         let msg = framing::read_framed(&mut self.transport, &mut self.rx_buf).await?;
-        parse_status(msg, expected_req)
+        parse_status(msg, self.session_id, expected_req)
     }
 
     fn next_req(&mut self) -> u16 {
@@ -161,162 +260,249 @@ impl<T: Read + Write> XrceSession<T> {
         self.seq = self.seq.wrapping_add(1);
         s
     }
-
-    /// Encode a CREATE submessage into `self.tx_buf`. Returns bytes written.
-    fn encode_create(&mut self, req_id: u16, obj_id: u16, xml: &str) -> Result<usize, XrceError> {
-        let seq = self.next_seq();
-        let mut b = MsgBuilder::new(&mut self.tx_buf);
-
-        // 8-byte message header (session with client key)
-        b.u8(self.session_id);
-        b.u8(STREAM_BEST_EFFORT);
-        b.u16(seq);
-        b.bytes(&self.client_key);
-
-        // Submessage header (length patched below)
-        let hdr_off = b.pos;
-        b.u8(SUBMSG_CREATE);
-        b.u8(FLAGS_CREATE);
-        b.u16(0); // length TBD
-
-        // CREATE payload
-        b.u16(req_id);  // request_id
-        b.u16(obj_id);  // object_id
-        b.u8(REPR_XML); // representation_kind = XML
-
-        // CDR string for the XML representation (u32 len + bytes + null)
-        // Must be 4-byte aligned; current pos after REPR_XML:
-        //   8 (msg hdr) + 4 (submsg hdr) + 2 + 2 + 1 = 17 → pad to 20
-        b.align(4);
-        b.u32((xml.len() as u32) + 1); // +1 for null
-        b.bytes(xml.as_bytes());
-        b.u8(0x00); // null terminator
-
-        b.patch_len(hdr_off);
-        Ok(b.pos)
-    }
-
-    /// Encode a WRITE_DATA submessage into `self.tx_buf`. Returns bytes written.
-    fn encode_write_data(&mut self, dw_id: u16, cdr: &[u8]) -> Result<usize, XrceError> {
-        if 8 + 4 + 4 + cdr.len() > self.tx_buf.len() {
-            return Err(XrceError::BufferTooSmall);
-        }
-        let seq = self.next_seq();
-        let mut b = MsgBuilder::new(&mut self.tx_buf);
-
-        // 8-byte message header
-        b.u8(self.session_id);
-        b.u8(STREAM_BEST_EFFORT);
-        b.u16(seq);
-        b.bytes(&self.client_key);
-
-        // Submessage header
-        let hdr_off = b.pos;
-        b.u8(SUBMSG_WRITE_DATA);
-        b.u8(FLAG_LE); // LE, single DATA format
-        b.u16(0);      // length TBD
-
-        // WRITE_DATA payload: req_id=0, DataWriter object_id, then CDR bytes
-        b.u16(0x0000); // req_id (unused for BEST_EFFORT)
-        b.u16(dw_id);  // DataWriter object_id
-        b.bytes(cdr);
-
-        b.patch_len(hdr_off);
-        Ok(b.pos)
-    }
 }
 
-// ── Free-standing protocol helpers ──────────────────────────────────────────
+// ── Encoding helpers ────────────────────────────────────────────────────────
 
-/// Build a CREATE_CLIENT message into `buf`. Returns bytes written.
-/// Uses NULL session header (4 bytes, no client key).
-fn build_create_client(buf: &mut [u8], session_id: u8) -> usize {
-    let mut b = MsgBuilder::new(buf);
+/// CREATE_CLIENT message. Layout: [msg header][submsg header][CLIENT_Representation].
+fn build_create_client(buf: &mut [u8], session_id: u8, client_key: &[u8; 4], mtu: u16) -> usize {
+    let mut b = MsgWriter::new(buf);
 
-    // 4-byte NULL session message header (session_id < 0x80 → no client key)
-    b.u8(SESSION_NULL);
+    // ── Message header ─────────────────────────────────────────────────────
+    // CREATE_CLIENT-specific rule: header session_id = info->id & 0x80,
+    // and key is included only when the masked value is < 0x80.
+    let masked_sid = session_id & SESSION_ID_WITHOUT_CLIENT_KEY;
+    b.u8(masked_sid);
     b.u8(STREAM_NONE);
-    b.u16(0); // sequence_nr
+    b.u16_raw(0); // seq_num
+    if masked_sid < SESSION_ID_WITHOUT_CLIENT_KEY {
+        b.bytes(client_key);
+    }
 
-    // Submessage header
-    let hdr_off = b.pos;
+    // ── Submessage header (length patched) ─────────────────────────────────
+    b.align_buf(4);
+    let hdr_off = b.pos();
     b.u8(SUBMSG_CREATE_CLIENT);
-    b.u8(FLAG_LE); // CREATE_CLIENT uses only LE flag; REUSE/REPLACE are for entity CREATE
-    b.u16(0); // TBD
+    b.u8(FLAG_LE);
+    b.u16_raw(0); // payload length (patched below)
+    let payload_origin = b.pos();
 
-    // CREATE_CLIENT payload
-    b.bytes(&XRCE_COOKIE);   // "XRCE"
-    b.bytes(&XRCE_VERSION);  // [0x01, 0x00]
-    b.bytes(&VENDOR_ID);     // [0x01, 0x0F] eProsima
-    b.u32(0);                // client_timestamp.seconds
-    b.u32(0);                // client_timestamp.nanoseconds
-    b.u8(session_id);        // requested session_id
-    b.align(4);              // CDR alignment: pad to 4-byte boundary before u32
-    b.u32(0);                // properties sequence (size=0)
+    // ── CLIENT_Representation (CDR origin = payload start) ─────────────────
+    b.bytes(&XRCE_COOKIE);
+    b.bytes(&XRCE_VERSION);
+    b.bytes(&VENDOR_ID_EPROSIMA);
+    b.bytes(client_key); // raw bytes, no alignment
+    b.u8(session_id); // payload session_id is the *real* id, not masked
+    b.u8(0); // optional_properties = false
+    // mtu is uint16 → 2-byte aligned in CDR. Current pos = origin+14 → already 2-aligned.
+    b.cdr_u16(mtu, payload_origin);
 
-    b.patch_len(hdr_off);
-    b.pos
+    let payload_len = b.pos() - payload_origin;
+    b.patch_u16_at(hdr_off + 2, payload_len as u16);
+    b.pos()
 }
 
-/// Parse STATUS_AGENT reply; only checks result.status == OK.
-///
-/// STATUS_AGENT payload layout (DDS-XRCE spec):
-///   [0..3]  xrce_cookie  (4 bytes)
-///   [4..5]  xrce_version (2 bytes)
-///   [6..7]  vendor_id    (2 bytes)
-///   [8..15] agent_timestamp (8 bytes: sec u32 + nsec u32)
-///   [16]    result.status
-///   [17]    result.implementation_status
-fn parse_status_agent(msg: &[u8]) -> Result<(), XrceError> {
-    // 4-byte null-session header + 4-byte submsg header + 18-byte payload
-    if msg.len() < 26 {
-        error!("[session] STATUS_AGENT too short: {} bytes", msg.len());
+/// CREATE_PARTICIPANT message.
+#[allow(clippy::too_many_arguments)]
+fn encode_create_participant(
+    buf: &mut [u8],
+    session_id: u8,
+    seq: u16,
+    client_key: &[u8; 4],
+    req_id: u16,
+    obj_id: u16,
+    xml: &str,
+    domain_id: i16,
+) -> Result<usize, XrceError> {
+    let mut b = MsgWriter::new(buf);
+    write_session_header(&mut b, session_id, STREAM_BEST_EFFORT, seq, client_key);
+
+    b.align_buf(4);
+    let hdr_off = b.pos();
+    b.u8(SUBMSG_CREATE);
+    b.u8(FLAGS_CREATE);
+    b.u16_raw(0);
+    let payload_origin = b.pos();
+
+    // BaseObjectRequest (4 bytes raw)
+    b.bytes(&request_id_be_bytes(req_id));
+    b.bytes(&object_id_be_bytes(obj_id));
+    // ObjectVariant kind byte
+    b.u8(ENTITY_PARTICIPANT);
+    // Representation3_Base.format
+    b.u8(REPR_AS_XML);
+    // CDR string (length is uint32 → align to 4 from CDR origin)
+    b.cdr_string(xml, payload_origin)?;
+    // domain_id is int16 → 2-aligned in CDR stream
+    b.cdr_i16(domain_id, payload_origin);
+
+    let payload_len = b.pos() - payload_origin;
+    b.patch_u16_at(hdr_off + 2, payload_len as u16);
+    if b.overflow() {
+        return Err(XrceError::BufferTooSmall);
+    }
+    Ok(b.pos())
+}
+
+/// CREATE message for entities that take a parent ObjectId trailer
+/// (Topic → Participant, Publisher → Participant, DataWriter → Publisher).
+#[allow(clippy::too_many_arguments)]
+fn encode_create_with_parent(
+    buf: &mut [u8],
+    session_id: u8,
+    seq: u16,
+    client_key: &[u8; 4],
+    req_id: u16,
+    obj_id: u16,
+    obj_kind: u8,
+    xml: &str,
+    parent_obj_id: u16,
+) -> Result<usize, XrceError> {
+    let mut b = MsgWriter::new(buf);
+    write_session_header(&mut b, session_id, STREAM_BEST_EFFORT, seq, client_key);
+
+    b.align_buf(4);
+    let hdr_off = b.pos();
+    b.u8(SUBMSG_CREATE);
+    b.u8(FLAGS_CREATE);
+    b.u16_raw(0);
+    let payload_origin = b.pos();
+
+    b.bytes(&request_id_be_bytes(req_id));
+    b.bytes(&object_id_be_bytes(obj_id));
+    b.u8(obj_kind);
+    b.u8(REPR_AS_XML);
+    b.cdr_string(xml, payload_origin)?;
+    // ObjectId trailer is 2 raw bytes (no CDR alignment).
+    b.bytes(&object_id_be_bytes(parent_obj_id));
+
+    let payload_len = b.pos() - payload_origin;
+    b.patch_u16_at(hdr_off + 2, payload_len as u16);
+    if b.overflow() {
+        return Err(XrceError::BufferTooSmall);
+    }
+    Ok(b.pos())
+}
+
+/// WRITE_DATA message (FORMAT_DATA, fire-and-forget).
+fn encode_write_data(
+    buf: &mut [u8],
+    session_id: u8,
+    seq: u16,
+    client_key: &[u8; 4],
+    dw_id: u16,
+    cdr_payload: &[u8],
+) -> Result<usize, XrceError> {
+    let mut b = MsgWriter::new(buf);
+    write_session_header(&mut b, session_id, STREAM_BEST_EFFORT, seq, client_key);
+
+    b.align_buf(4);
+    let hdr_off = b.pos();
+    b.u8(SUBMSG_WRITE_DATA);
+    b.u8(FLAG_LE | FORMAT_DATA);
+    b.u16_raw(0);
+    let payload_origin = b.pos();
+
+    // BaseObjectRequest. request_id unused for BEST_EFFORT writes.
+    b.bytes(&request_id_be_bytes(0));
+    b.bytes(&object_id_be_bytes(dw_id));
+    // CDR-encapsulated user data appended raw.
+    b.bytes(cdr_payload);
+
+    let payload_len = b.pos() - payload_origin;
+    b.patch_u16_at(hdr_off + 2, payload_len as u16);
+    if b.overflow() {
+        return Err(XrceError::BufferTooSmall);
+    }
+    Ok(b.pos())
+}
+
+/// Standard message header used for everything except CREATE_CLIENT.
+fn write_session_header(
+    b: &mut MsgWriter,
+    session_id: u8,
+    stream_id: u8,
+    seq: u16,
+    client_key: &[u8; 4],
+) {
+    b.u8(session_id);
+    b.u8(stream_id);
+    b.u16_raw(seq);
+    if session_id < SESSION_ID_WITHOUT_CLIENT_KEY {
+        b.bytes(client_key);
+    }
+}
+
+// ── Reply parsers ───────────────────────────────────────────────────────────
+
+/// STATUS_AGENT layout (eProsima):
+///   msg_hdr (4 or 8 bytes) + submsg_hdr (4) + ResultStatus (2) + AGENT_Representation (≥9).
+fn parse_status_agent(msg: &[u8], session_id: u8) -> Result<(), XrceError> {
+    let hdr = expected_header_len(session_id);
+    if msg.len() < hdr + 4 + 2 {
+        error!("[session] STATUS_AGENT too short: {}", msg.len());
         return Err(XrceError::UnexpectedReply);
     }
-    // Skip message header (4 bytes for NULL session)
-    let submsg = &msg[4..];
-    debug!("[session] STATUS_AGENT submsg[0]=0x{:02X} (expect 0x{:02X})", submsg[0], SUBMSG_STATUS_AGENT);
-    if submsg[0] != SUBMSG_STATUS_AGENT {
-        error!("[session] unexpected submsg type 0x{:02X}", submsg[0]);
+    let submsg_id = msg[hdr];
+    if submsg_id != SUBMSG_STATUS_AGENT {
+        error!(
+            "[session] expected STATUS_AGENT (0x04), got 0x{:02X}",
+            submsg_id
+        );
         return Err(XrceError::UnexpectedReply);
     }
-    // Submessage header is 4 bytes; payload starts at [4]
-    // result.status is at payload[16]: after cookie(4) + version(2) + vendor(2) + timestamp(8)
-    let payload = &submsg[4..];
-    let status = payload[16];
-    debug!("[session] STATUS_AGENT result.status=0x{:02X} (expect STATUS_OK=0x00)", status);
+    let payload = &msg[hdr + 4..];
+    let status = payload[0];
+    debug!("[session] STATUS_AGENT result.status=0x{:02X}", status);
     if status != STATUS_OK {
-        error!("[session] agent rejected: status=0x{:02X}", status);
         return Err(XrceError::AgentRejected(status));
     }
     Ok(())
 }
 
-/// Parse STATUS reply to a CREATE submessage; checks req_id and result.status.
-fn parse_status(msg: &[u8], expected_req: u16) -> Result<(), XrceError> {
-    // Minimum: 8-byte header + 4-byte submsg header + 4-byte payload
-    if msg.len() < 16 {
+/// STATUS layout (response to CREATE/DELETE):
+///   msg_hdr + submsg_hdr (4) + BaseObjectReply
+///     related_request: req_id (2 raw) + obj_id (2 raw)
+///     result:          status (1) + impl_status (1)
+fn parse_status(msg: &[u8], session_id: u8, expected_req: u16) -> Result<(), XrceError> {
+    let hdr = expected_header_len(session_id);
+    if msg.len() < hdr + 4 + 6 {
         return Err(XrceError::UnexpectedReply);
     }
-    // Skip 8-byte message header
-    let submsg = &msg[8..];
-    if submsg[0] != SUBMSG_STATUS {
+    let submsg_id = msg[hdr];
+    if submsg_id != SUBMSG_STATUS {
+        error!(
+            "[session] expected STATUS (0x05), got 0x{:02X}",
+            submsg_id
+        );
         return Err(XrceError::UnexpectedReply);
     }
-    // Payload: [req_id_lo, req_id_hi, status, impl_status]
-    let payload = &submsg[4..];
-    let got_req = u16::from_le_bytes([payload[0], payload[1]]);
+    let payload = &msg[hdr + 4..];
+    let got_req = u16::from_be_bytes([payload[0], payload[1]]);
     if got_req != expected_req {
+        error!(
+            "[session] STATUS req mismatch: got {} expected {}",
+            got_req, expected_req
+        );
         return Err(XrceError::StatusReqMismatch);
     }
-    let status = payload[2];
-    if status != STATUS_OK {
+    let status = payload[4];
+    if status != STATUS_OK && status != STATUS_OK_MATCHED {
         return Err(XrceError::AgentRejected(status));
     }
     Ok(())
 }
 
-// ── XML builder helpers ──────────────────────────────────────────────────────
+#[inline]
+fn expected_header_len(session_id: u8) -> usize {
+    if session_id < SESSION_ID_WITHOUT_CLIENT_KEY {
+        8
+    } else {
+        4
+    }
+}
+
+// ── XML builders (no_alloc) ─────────────────────────────────────────────────
 
 fn fmt_participant_xml<'b>(buf: &'b mut [u8], name: &str) -> &'b str {
     let mut w = StrWriter::new(buf);
@@ -346,8 +532,6 @@ fn fmt_datawriter_xml<'b>(buf: &'b mut [u8], dds_name: &str, type_name: &str) ->
     w.finish()
 }
 
-// ── Minimal no_alloc string builder ─────────────────────────────────────────
-
 struct StrWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
@@ -374,58 +558,113 @@ impl<'a> StrWriter<'a> {
 
 // ── Low-level message byte builder ──────────────────────────────────────────
 
-struct MsgBuilder<'a> {
+/// Writes XRCE messages with two distinct alignment domains:
+///   - Buffer-relative `align_buf(n)`: used for submessage header placement
+///     (always 4-byte aligned in the message buffer).
+///   - CDR-stream `cdr_*(value, origin)`: used inside a submessage payload,
+///     where the origin is the byte offset of the payload start.
+struct MsgWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
+    overflow: bool,
 }
 
-impl<'a> MsgBuilder<'a> {
+impl<'a> MsgWriter<'a> {
     fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            buf,
+            pos: 0,
+            overflow: false,
+        }
+    }
+
+    fn pos(&self) -> usize {
+        self.pos
+    }
+
+    fn overflow(&self) -> bool {
+        self.overflow || self.pos > self.buf.len()
     }
 
     fn u8(&mut self, v: u8) {
         if self.pos < self.buf.len() {
             self.buf[self.pos] = v;
+        } else {
+            self.overflow = true;
         }
         self.pos += 1;
     }
 
-    fn u16(&mut self, v: u16) {
-        let b = v.to_le_bytes();
-        self.bytes(&b);
-    }
-
-    fn u32(&mut self, v: u32) {
-        let b = v.to_le_bytes();
-        self.bytes(&b);
+    /// Write a u16 LE without aligning (for raw-byte fields like seq_num that
+    /// happen to fall on a 2-aligned offset in their parent layout).
+    fn u16_raw(&mut self, v: u16) {
+        self.bytes(&v.to_le_bytes());
     }
 
     fn bytes(&mut self, data: &[u8]) {
         let space = self.buf.len().saturating_sub(self.pos);
+        if data.len() > space {
+            self.overflow = true;
+        }
         let n = data.len().min(space);
         self.buf[self.pos..self.pos + n].copy_from_slice(&data[..n]);
         self.pos += data.len();
     }
 
-    fn align(&mut self, n: usize) {
+    /// Pad to a buffer-relative `n`-byte boundary.
+    fn align_buf(&mut self, n: usize) {
         let rem = self.pos % n;
         if rem != 0 {
-            let pad = n - rem;
-            for _ in 0..pad {
+            for _ in 0..(n - rem) {
                 self.u8(0);
             }
         }
     }
 
-    /// Patch the submessage length field at `hdr_off + 2` with the number of
-    /// payload bytes (everything after the 4-byte submessage header).
-    fn patch_len(&mut self, hdr_off: usize) {
-        let payload_len = (self.pos - hdr_off - 4) as u16;
-        let b = payload_len.to_le_bytes();
-        if hdr_off + 4 <= self.buf.len() {
-            self.buf[hdr_off + 2] = b[0];
-            self.buf[hdr_off + 3] = b[1];
+    /// Pad so that `(pos - origin) % n == 0`, then write `n` zero/value bytes.
+    fn cdr_align(&mut self, origin: usize, n: usize) {
+        let rem = (self.pos - origin) % n;
+        if rem != 0 {
+            for _ in 0..(n - rem) {
+                self.u8(0);
+            }
+        }
+    }
+
+    fn cdr_u16(&mut self, v: u16, origin: usize) {
+        self.cdr_align(origin, 2);
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn cdr_i16(&mut self, v: i16, origin: usize) {
+        self.cdr_align(origin, 2);
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn cdr_u32(&mut self, v: u32, origin: usize) {
+        self.cdr_align(origin, 4);
+        self.bytes(&v.to_le_bytes());
+    }
+
+    /// CDR string: u32 length (incl. null terminator) + bytes + '\0'.
+    fn cdr_string(&mut self, s: &str, origin: usize) -> Result<(), XrceError> {
+        let len_with_null = s.len() as u32 + 1;
+        self.cdr_u32(len_with_null, origin);
+        self.bytes(s.as_bytes());
+        self.u8(0);
+        if self.overflow() {
+            return Err(XrceError::BufferTooSmall);
+        }
+        Ok(())
+    }
+
+    fn patch_u16_at(&mut self, offset: usize, value: u16) {
+        if offset + 2 <= self.buf.len() {
+            let b = value.to_le_bytes();
+            self.buf[offset] = b[0];
+            self.buf[offset + 1] = b[1];
+        } else {
+            self.overflow = true;
         }
     }
 }

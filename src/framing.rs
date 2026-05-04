@@ -55,11 +55,20 @@ async fn write_all<W: Write>(w: &mut W, mut buf: &[u8]) -> Result<(), XrceError>
 
 async fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> Result<(), XrceError> {
     while !buf.is_empty() {
-        let n = r.read(buf).await.map_err(|_| XrceError::Io)?;
-        if n == 0 {
-            return Err(XrceError::Disconnected);
+        match r.read(buf).await {
+            Err(_) => {
+                error!("[framing] read: IO error (TCP reset or socket error)");
+                return Err(XrceError::Io);
+            }
+            Ok(0) => {
+                error!("[framing] read: TCP connection closed (0 bytes)");
+                return Err(XrceError::Disconnected);
+            }
+            Ok(n) => {
+                debug!("[framing] read: +{} bytes ({} remaining)", n, buf.len() - n);
+                buf = &mut buf[n..];
+            }
         }
-        buf = &mut buf[n..];
     }
     Ok(())
 }

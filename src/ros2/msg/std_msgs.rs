@@ -1,14 +1,18 @@
 use crate::cdr::CdrWriter;
 
+// All serializers in this module emit ONLY the CDR field bytes — the 4-byte
+// CDR encapsulation header (`0x00 0x01 0x00 0x00` for CDR_LE) is prepended by
+// the agent / Fast-DDS when forming the DDS SerializedPayload. Writing it here
+// produces a doubled header on the wire and breaks deserialization.
+
 // ── std_msgs/Float32 ─────────────────────────────────────────────────────────
 
 pub const FLOAT32_TYPE: &str = "std_msgs::msg::dds_::Float32_";
 
-/// CDR-serialize a std_msgs/Float32 message.
-/// Buffer must be ≥ 8 bytes. Returns the filled slice.
+/// CDR-serialize a std_msgs/Float32 message body (no encap header).
+/// Buffer must be ≥ 4 bytes. Returns the filled slice.
 pub fn serialize_float32<'a>(buf: &'a mut [u8], data: f32) -> &'a [u8] {
     let mut w = CdrWriter::new(buf);
-    w.header();
     w.f32_val(data);
     w.finish()
 }
@@ -17,11 +21,10 @@ pub fn serialize_float32<'a>(buf: &'a mut [u8], data: f32) -> &'a [u8] {
 
 pub const STRING_TYPE: &str = "std_msgs::msg::dds_::String_";
 
-/// CDR-serialize a std_msgs/String message.
-/// Buffer must be ≥ 4 + 4 + data.len() + 1 bytes (header + len + bytes + null).
+/// CDR-serialize a std_msgs/String message body (no encap header).
+/// Buffer must be ≥ 4 + data.len() + 1 bytes (length + bytes + null).
 pub fn serialize_string<'a>(buf: &'a mut [u8], data: &str) -> &'a [u8] {
     let mut w = CdrWriter::new(buf);
-    w.header();
     w.string(data);
     w.finish()
 }
