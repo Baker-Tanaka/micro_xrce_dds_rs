@@ -19,15 +19,15 @@ pub const RANGE_INFRARED: u8 = 1;
 ///   max_range      f32
 ///   range          f32
 ///   variance       f32
-pub fn serialize_range(
-    buf: &mut [u8],
+pub fn serialize_range<'a>(
+    buf: &'a mut [u8],
     radiation_type: u8,
     field_of_view: f32,
     min_range: f32,
     max_range: f32,
     range: f32,
     variance: f32,
-) -> &[u8] {
+) -> &'a [u8] {
     let mut w = CdrWriter::new(buf);
     w.header();
     write_header_zero(&mut w);
@@ -56,15 +56,15 @@ pub const IMU_TYPE: &str = "sensor_msgs::msg::dds_::Imu_";
 ///   linear_acceleration [f64; 3]       24 bytes
 ///   linear_acceleration_covariance [f64;9] 72 bytes
 #[allow(clippy::too_many_arguments)]
-pub fn serialize_imu(
-    buf: &mut [u8],
+pub fn serialize_imu<'a>(
+    buf: &'a mut [u8],
     orientation: &[f64; 4],
     orientation_covariance: &[f64; 9],
     angular_velocity: &[f64; 3],
     angular_velocity_covariance: &[f64; 9],
     linear_acceleration: &[f64; 3],
     linear_acceleration_covariance: &[f64; 9],
-) -> &[u8] {
+) -> &'a [u8] {
     let mut w = CdrWriter::new(buf);
     w.header();
     write_header_zero(&mut w);

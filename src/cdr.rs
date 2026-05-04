@@ -66,8 +66,9 @@ impl<'a> CdrWriter<'a> {
         self.pos.min(self.buf.len())
     }
 
-    pub fn finish(&self) -> &[u8] {
-        &self.buf[..self.bytes_written()]
+    pub fn finish(self) -> &'a [u8] {
+        let end = self.pos.min(self.buf.len());
+        &self.buf[..end]
     }
 
     // ── internal helpers ────────────────────────────────────────────────────

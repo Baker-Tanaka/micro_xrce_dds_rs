@@ -6,10 +6,10 @@ pub const FLOAT32_TYPE: &str = "std_msgs::msg::dds_::Float32_";
 
 /// CDR-serialize a std_msgs/Float32 message.
 /// Buffer must be ≥ 8 bytes. Returns the filled slice.
-pub fn serialize_float32(buf: &mut [u8], data: f32) -> &[u8] {
+pub fn serialize_float32<'a>(buf: &'a mut [u8], data: f32) -> &'a [u8] {
     let mut w = CdrWriter::new(buf);
-    w.header();   // 4 bytes
-    w.f32_val(data); // 4 bytes
+    w.header();
+    w.f32_val(data);
     w.finish()
 }
 
@@ -19,7 +19,7 @@ pub const STRING_TYPE: &str = "std_msgs::msg::dds_::String_";
 
 /// CDR-serialize a std_msgs/String message.
 /// Buffer must be ≥ 4 + 4 + data.len() + 1 bytes (header + len + bytes + null).
-pub fn serialize_string(buf: &mut [u8], data: &str) -> &[u8] {
+pub fn serialize_string<'a>(buf: &'a mut [u8], data: &str) -> &'a [u8] {
     let mut w = CdrWriter::new(buf);
     w.header();
     w.string(data);

@@ -1,6 +1,13 @@
 use embedded_io_async::{Read, Write};
 use crate::{error::XrceError, framing, protocol::*};
 
+#[cfg(feature = "defmt")]
+use defmt::{debug, error};
+#[cfg(not(feature = "defmt"))]
+macro_rules! debug { ($($t:tt)*) => {}; }
+#[cfg(not(feature = "defmt"))]
+macro_rules! error { ($($t:tt)*) => {}; }
+
 /// An XRCE-DDS entity ID as packed by the eProsima convention:
 /// upper 12 bits = entity index, lower 4 bits = entity type.
 #[derive(Clone, Copy)]
@@ -8,12 +15,12 @@ pub struct ObjectId(pub u16);
 
 /// Opaque handle returned by `create_datawriter`.
 #[derive(Clone, Copy)]
-pub struct DataWriterId(pub(crate) u16);
+pub struct DataWriterId(pub u16);
 
 /// Established XRCE-DDS session over a TCP connection to the micro-ROS Agent.
 ///
 /// # Transport
-/// Uses TCP framing: each XRCE message is prefixed by a 4-byte LE payload length.
+/// Uses TCP framing: each XRCE message is prefixed by a 2-byte LE payload length.
 ///
 /// # Reliability
 /// All entity-creation operations use the BEST_EFFORT output stream (stream_id = 0x01)
@@ -39,12 +46,16 @@ impl<T: Read + Write> XrceSession<T> {
         client_key: [u8; 4],
     ) -> Result<Self, XrceError> {
         let mut tx = [0u8; 64];
-        let mut rx = [0u8; 64];
+        let mut rx = [0u8; 128];
 
         let n = build_create_client(&mut tx, session_id);
+        debug!("[session] sending CREATE_CLIENT ({} bytes)", n);
         framing::write_framed(&mut transport, &tx[..n]).await?;
+        debug!("[session] CREATE_CLIENT sent, waiting for STATUS_AGENT");
 
         let reply = framing::read_framed(&mut transport, &mut rx).await?;
+        let show = reply.len().min(16);
+        debug!("[session] STATUS_AGENT raw ({} bytes): {=[u8]}", reply.len(), &reply[..show]);
         parse_status_agent(reply)?;
 
         Ok(Self {
@@ -230,7 +241,7 @@ fn build_create_client(buf: &mut [u8], session_id: u8) -> usize {
     // Submessage header
     let hdr_off = b.pos;
     b.u8(SUBMSG_CREATE_CLIENT);
-    b.u8(FLAGS_CREATE);
+    b.u8(FLAG_LE); // CREATE_CLIENT uses only LE flag; REUSE/REPLACE are for entity CREATE
     b.u16(0); // TBD
 
     // CREATE_CLIENT payload
@@ -240,6 +251,7 @@ fn build_create_client(buf: &mut [u8], session_id: u8) -> usize {
     b.u32(0);                // client_timestamp.seconds
     b.u32(0);                // client_timestamp.nanoseconds
     b.u8(session_id);        // requested session_id
+    b.align(4);              // CDR alignment: pad to 4-byte boundary before u32
     b.u32(0);                // properties sequence (size=0)
 
     b.patch_len(hdr_off);
@@ -247,20 +259,34 @@ fn build_create_client(buf: &mut [u8], session_id: u8) -> usize {
 }
 
 /// Parse STATUS_AGENT reply; only checks result.status == OK.
+///
+/// STATUS_AGENT payload layout (DDS-XRCE spec):
+///   [0..3]  xrce_cookie  (4 bytes)
+///   [4..5]  xrce_version (2 bytes)
+///   [6..7]  vendor_id    (2 bytes)
+///   [8..15] agent_timestamp (8 bytes: sec u32 + nsec u32)
+///   [16]    result.status
+///   [17]    result.implementation_status
 fn parse_status_agent(msg: &[u8]) -> Result<(), XrceError> {
-    // Minimum: 4-byte null-session header + 4-byte submsg header + 2-byte result
-    if msg.len() < 10 {
+    // 4-byte null-session header + 4-byte submsg header + 18-byte payload
+    if msg.len() < 26 {
+        error!("[session] STATUS_AGENT too short: {} bytes", msg.len());
         return Err(XrceError::UnexpectedReply);
     }
     // Skip message header (4 bytes for NULL session)
     let submsg = &msg[4..];
+    debug!("[session] STATUS_AGENT submsg[0]=0x{:02X} (expect 0x{:02X})", submsg[0], SUBMSG_STATUS_AGENT);
     if submsg[0] != SUBMSG_STATUS_AGENT {
+        error!("[session] unexpected submsg type 0x{:02X}", submsg[0]);
         return Err(XrceError::UnexpectedReply);
     }
     // Submessage header is 4 bytes; payload starts at [4]
+    // result.status is at payload[16]: after cookie(4) + version(2) + vendor(2) + timestamp(8)
     let payload = &submsg[4..];
-    let status = payload[0];
+    let status = payload[16];
+    debug!("[session] STATUS_AGENT result.status=0x{:02X} (expect STATUS_OK=0x00)", status);
     if status != STATUS_OK {
+        error!("[session] agent rejected: status=0x{:02X}", status);
         return Err(XrceError::AgentRejected(status));
     }
     Ok(())
@@ -340,7 +366,7 @@ impl<'a> StrWriter<'a> {
         self.pos += bytes.len();
     }
 
-    fn finish(&self) -> &str {
+    fn finish(self) -> &'a str {
         let end = self.pos.min(self.buf.len());
         core::str::from_utf8(&self.buf[..end]).unwrap_or("")
     }

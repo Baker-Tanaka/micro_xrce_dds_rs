@@ -1,12 +1,24 @@
 use embedded_io_async::{Read, Write};
 use crate::error::XrceError;
 
+#[cfg(feature = "defmt")]
+use defmt::{debug, error};
+#[cfg(not(feature = "defmt"))]
+macro_rules! debug { ($($t:tt)*) => {}; }
+#[cfg(not(feature = "defmt"))]
+macro_rules! error { ($($t:tt)*) => {}; }
+
 /// Write a length-prefixed XRCE-DDS frame over TCP.
-/// Format: [payload_len: u32 LE] [payload: payload_len bytes]
+/// Format: [payload_len: u16 LE] [payload: payload_len bytes]
+/// Matches the eProsima Micro XRCE-DDS Agent TCP transport framing.
 pub async fn write_framed<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), XrceError> {
-    let len_bytes = (payload.len() as u32).to_le_bytes();
+    debug!("[framing] tx {} bytes", payload.len());
+    let len_bytes = (payload.len() as u16).to_le_bytes();
     write_all(writer, &len_bytes).await?;
-    write_all(writer, payload).await
+    write_all(writer, payload).await?;
+    writer.flush().await.map_err(|_| XrceError::Io)?;
+    debug!("[framing] tx flush OK");
+    Ok(())
 }
 
 /// Read one length-prefixed XRCE-DDS frame into `buf`.
@@ -15,13 +27,18 @@ pub async fn read_framed<'b, R: Read>(
     reader: &mut R,
     buf: &'b mut [u8],
 ) -> Result<&'b [u8], XrceError> {
-    let mut len_buf = [0u8; 4];
+    debug!("[framing] waiting for frame header...");
+    let mut len_buf = [0u8; 2];
     read_exact(reader, &mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
+    let len = u16::from_le_bytes(len_buf) as usize;
+    debug!("[framing] frame header: len={}", len);
     if len > buf.len() {
+        error!("[framing] frame too large: len={} buf={}", len, buf.len());
         return Err(XrceError::BufferTooSmall);
     }
     read_exact(reader, &mut buf[..len]).await?;
+    let show = len.min(8);
+    debug!("[framing] rx {} bytes head={=[u8]}", len, &buf[..show]);
     Ok(&buf[..len])
 }
 
