@@ -39,6 +39,15 @@ impl<'a> CdrWriter<'a> {
         self.raw(&v.to_le_bytes());
     }
 
+    pub fn i32_val(&mut self, v: i32) {
+        self.align(4);
+        self.raw(&v.to_le_bytes());
+    }
+
+    pub fn bool_val(&mut self, v: bool) {
+        self.raw(&[v as u8]);
+    }
+
     pub fn f32_val(&mut self, v: f32) {
         self.align(4);
         self.raw(&v.to_le_bytes());

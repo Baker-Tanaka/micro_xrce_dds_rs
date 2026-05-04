@@ -1,5 +1,5 @@
 use embedded_io_async::{Read, Write};
-use crate::error::XrceError;
+use crate::error::Error;
 
 #[cfg(feature = "defmt")]
 use defmt::{debug, error};
@@ -11,12 +11,12 @@ macro_rules! error { ($($t:tt)*) => {}; }
 /// Write a length-prefixed XRCE-DDS frame over TCP.
 /// Format: [payload_len: u16 LE] [payload: payload_len bytes]
 /// Matches the eProsima Micro XRCE-DDS Agent TCP transport framing.
-pub async fn write_framed<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), XrceError> {
+pub async fn write_framed<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), Error> {
     debug!("[framing] tx {} bytes", payload.len());
     let len_bytes = (payload.len() as u16).to_le_bytes();
     write_all(writer, &len_bytes).await?;
     write_all(writer, payload).await?;
-    writer.flush().await.map_err(|_| XrceError::Io)?;
+    writer.flush().await.map_err(|_| Error::Io)?;
     debug!("[framing] tx flush OK");
     Ok(())
 }
@@ -26,7 +26,7 @@ pub async fn write_framed<W: Write>(writer: &mut W, payload: &[u8]) -> Result<()
 pub async fn read_framed<'b, R: Read>(
     reader: &mut R,
     buf: &'b mut [u8],
-) -> Result<&'b [u8], XrceError> {
+) -> Result<&'b [u8], Error> {
     debug!("[framing] waiting for frame header...");
     let mut len_buf = [0u8; 2];
     read_exact(reader, &mut len_buf).await?;
@@ -34,7 +34,7 @@ pub async fn read_framed<'b, R: Read>(
     debug!("[framing] frame header: len={}", len);
     if len > buf.len() {
         error!("[framing] frame too large: len={} buf={}", len, buf.len());
-        return Err(XrceError::BufferTooSmall);
+        return Err(Error::BufferTooSmall);
     }
     read_exact(reader, &mut buf[..len]).await?;
     let show = len.min(8);
@@ -42,27 +42,27 @@ pub async fn read_framed<'b, R: Read>(
     Ok(&buf[..len])
 }
 
-async fn write_all<W: Write>(w: &mut W, mut buf: &[u8]) -> Result<(), XrceError> {
+async fn write_all<W: Write>(w: &mut W, mut buf: &[u8]) -> Result<(), Error> {
     while !buf.is_empty() {
-        let n = w.write(buf).await.map_err(|_| XrceError::Io)?;
+        let n = w.write(buf).await.map_err(|_| Error::Io)?;
         if n == 0 {
-            return Err(XrceError::Disconnected);
+            return Err(Error::Disconnected);
         }
         buf = &buf[n..];
     }
     Ok(())
 }
 
-async fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> Result<(), XrceError> {
+async fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> Result<(), Error> {
     while !buf.is_empty() {
         match r.read(buf).await {
             Err(_) => {
                 error!("[framing] read: IO error (TCP reset or socket error)");
-                return Err(XrceError::Io);
+                return Err(Error::Io);
             }
             Ok(0) => {
                 error!("[framing] read: TCP connection closed (0 bytes)");
-                return Err(XrceError::Disconnected);
+                return Err(Error::Disconnected);
             }
             Ok(n) => {
                 debug!("[framing] read: +{} bytes ({} remaining)", n, buf.len() - n);
