@@ -1,8 +1,11 @@
 //! CDR Little Endian deserializer for ROS2 DDS message bodies.
 //!
-//! Companion to [`crate::cdr::CdrWriter`]. Handles the 4-byte CDR encapsulation
-//! header automatically (skipped on construction), then exposes typed reads
-//! with proper alignment relative to the body origin.
+//! Companion to [`crate::cdr::CdrWriter`]. Two constructors:
+//!
+//! - [`CdrReader::new`] — skips the 4-byte CDR encapsulation header (use when
+//!   the buffer starts with `\x00\x01\x00\x00`).
+//! - [`CdrReader::from_body`] — no skip (use when the buffer is a raw CDR body
+//!   as delivered by the micro-ROS agent in DATA submessages).
 
 use crate::error::Error;
 use core::convert::TryInto;

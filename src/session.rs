@@ -327,15 +327,15 @@ impl<T: Read + Write> Session<T> {
     }
 
     async fn send_read_data(&mut self, dr_oid: u16) -> Result<(), Error> {
+        // READ_DATA is fire-and-forget — eProsima's `uxr_buffer_request_data`
+        // never waits for a STATUS reply, and the agent doesn't send one.
+        // Waiting here would hang until the TCP read times out.
         let req = self.next_req();
         let seq = self.next_seq();
         let session_id = self.session_id;
         let key = self.client_key;
         let n = encode_read_data(&mut self.tx_buf, session_id, seq, &key, req, dr_oid)?;
-        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await?;
-        // STATUS reply is expected. Drain until we see it (DATA samples may
-        // already have arrived in between for fast-tickling topics).
-        self.wait_status_for(req).await
+        framing::write_framed(&mut self.transport, &self.tx_buf[..n]).await
     }
 
     /// Read frames until we see the STATUS for `expected_req`. Any DATA
@@ -411,10 +411,18 @@ impl<T: Read + Write> Session<T> {
         // BaseObjectReply: req_id (2 BE) + obj_id (2 BE)
         let dr_oid = u16::from_be_bytes([payload[2], payload[3]]);
         let user_data = &payload[4..];
+        let show = user_data.len().min(16);
+        debug!(
+            "[session] DATA dr_oid=0x{:04X} user_data_len={} head={=[u8]}",
+            dr_oid, user_data.len(), &user_data[..show]
+        );
         for slot in subs {
             if slot.dr_id() == dr_oid {
                 if let Err(e) = slot.try_deliver(user_data) {
-                    warn!("[session] sub deliver failed: {}", e);
+                    warn!(
+                        "[session] sub deliver failed: {} (user_data_len={} head={=[u8]})",
+                        e, user_data.len(), &user_data[..show]
+                    );
                 }
                 return;
             }
@@ -678,11 +686,25 @@ fn parse_status_payload(payload: &[u8], expected_req: u16) -> Result<(), Error> 
         error!("[session] STATUS req mismatch: got {} expected {}", got_req, expected_req);
         return Err(Error::StatusReqMismatch);
     }
+    let obj_id = u16::from_be_bytes([payload[2], payload[3]]);
     let status = payload[4];
-    if status != STATUS_OK && status != STATUS_OK_MATCHED {
-        return Err(Error::AgentRejected(status));
+    match status {
+        STATUS_OK => Ok(()),
+        STATUS_OK_MATCHED => {
+            // Matched a pre-existing entity from an earlier session. Often
+            // benign, but if the previous firmware used the same entity index
+            // for a *different* topic/type, downstream CREATE_DATAREADER /
+            // CREATE_DATAWRITER on the same id will likely be rejected with
+            // STATUS_ERR_DDS_ERROR (0x80). Restart the agent (`docker restart
+            // micro_ros_agent`) or use a fresh `client_key` to clear it.
+            warn!(
+                "[session] STATUS_OK_MATCHED for obj_id=0x{:04X} — stale entity reused from a previous session; restart the agent if subsequent CREATEs fail",
+                obj_id
+            );
+            Ok(())
+        }
+        _ => Err(Error::AgentRejected(status)),
     }
-    Ok(())
 }
 
 // ── MsgWriter (re-used internally) ──────────────────────────────────────────

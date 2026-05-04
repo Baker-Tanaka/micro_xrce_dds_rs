@@ -90,7 +90,8 @@ where
     }
 
     fn try_deliver(&self, payload: &[u8]) -> Result<(), Error> {
-        let mut r = CdrReader::new(payload);
+        // The micro-ROS agent delivers raw CDR body bytes (no encap header).
+        let mut r = CdrReader::from_body(payload);
         let msg = M::deserialize(&mut r)?;
         self.inbox
             .try_send(msg)
