@@ -16,6 +16,12 @@
 //! Subscriptions follow a `&'static`-slot pattern (see the [`Subscription`]
 //! docs) — the slot is registered with the session, and the user task awaits
 //! samples on `slot.recv()` while a separate task drives `session.spin()`.
+//!
+//! ## v0.2 Runtime layer (in progress)
+//!
+//! A new [`Runtime`] / [`Context`] API is being built alongside the legacy
+//! `Session` API.  `Session` will be removed in the v0.2 release once all
+//! examples have been migrated (Phase 5 of the roadmap).
 
 #![no_std]
 
@@ -28,6 +34,7 @@ pub mod node;
 pub mod protocol;
 pub mod publisher;
 pub mod ros2;
+pub mod rt;
 pub mod session;
 pub mod subscription;
 
@@ -35,6 +42,7 @@ pub use error::Error;
 pub use message::Message;
 pub use node::Node;
 pub use publisher::Publisher;
+pub use rt::{Context, Executor, Runtime, RuntimeConfig};
 pub use session::Session;
 pub use subscription::{Subscription, SubscriptionSlot};
 

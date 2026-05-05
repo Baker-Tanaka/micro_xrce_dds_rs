@@ -13,5 +13,16 @@ defmt = ["dep:defmt", "embassy-sync/defmt"]
 embedded-io-async = "0.6"
 heapless = "0.8"
 embassy-sync = { version = "0.8" }
-portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
+embassy-futures = { version = "0.1" }
 defmt = { version = "1.0", optional = true }
+
+# On ARM bare-metal (Cortex-M0+ has no native atomic instructions):
+# use the software-fallback via unsafe-assume-single-core.
+# On host (x86_64, used for `cargo test`): native atomics work fine,
+# so we omit the feature to avoid a compile error in portable-atomic's
+# fallback module gating.
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
+portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
+
+[target.'cfg(not(all(target_arch = "arm", target_os = "none")))'.dependencies]
+portable-atomic = { version = "1" }

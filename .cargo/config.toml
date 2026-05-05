@@ -1,0 +1,8 @@
+# When running `cargo test` from within this crate directory, override the
+# workspace-root target (thumbv6m-none-eabi) with the host so that the
+# standard `test` crate and panic handler are available.
+#
+# The workspace build (run from /tenshi-no-hana/) never loads this file
+# because cargo config search starts from the CWD, not from each crate.
+[build]
+target = "x86_64-unknown-linux-gnu"

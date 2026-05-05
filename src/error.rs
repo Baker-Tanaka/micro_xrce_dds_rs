@@ -19,6 +19,10 @@ pub enum Error {
     SubscriptionOverflow,
     /// Too many subscriptions registered for the dispatch table.
     TooManySubscriptions,
+    /// A CREATE_* request did not receive a STATUS reply within the timeout.
+    Timeout,
+    /// A `Context` method was called before `Runtime::start()` completed.
+    NotStarted,
 }
 
 #[cfg(feature = "defmt")]
@@ -34,6 +38,8 @@ impl defmt::Format for Error {
             Error::Deserialization => defmt::write!(f, "Deserialization"),
             Error::SubscriptionOverflow => defmt::write!(f, "SubscriptionOverflow"),
             Error::TooManySubscriptions => defmt::write!(f, "TooManySubscriptions"),
+            Error::Timeout => defmt::write!(f, "Timeout"),
+            Error::NotStarted => defmt::write!(f, "NotStarted"),
         }
     }
 }
