@@ -24,6 +24,8 @@
 //! }
 //! ```
 
+pub mod creation;
+pub mod encode;
 pub mod executor;
 pub mod inner;
 
@@ -32,7 +34,7 @@ pub use inner::{Frame, SessionInner, FRAME_BUF_SIZE, MAX_SUBS, TX_QUEUE_DEPTH};
 
 use embedded_io_async::{Read, Write};
 
-use crate::{error::Error, framing, session};
+use crate::{error::Error, framing};
 
 // ── RuntimeConfig ─────────────────────────────────────────────────────────────
 
@@ -117,12 +119,12 @@ impl Runtime {
         config: RuntimeConfig,
     ) -> Result<(Context, Executor<T>), Error> {
         let mut tx_buf = [0u8; 64];
-        let n = session::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
+        let n = encode::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
         framing::write_framed(&mut transport, &tx_buf[..n]).await?;
 
         let mut rx_buf = [0u8; 128];
         let reply = framing::read_framed(&mut transport, &mut rx_buf).await?;
-        session::parse_status_agent(reply, config.session_id)?;
+        encode::parse_status_agent(reply, config.session_id)?;
 
         self.inner.set_session_identity(config.session_id, config.client_key);
 

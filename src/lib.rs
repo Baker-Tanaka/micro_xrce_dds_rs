@@ -1,27 +1,24 @@
 //! `micro_xrce_dds_rs` — `no_std` micro-ROS / XRCE-DDS client SDK.
 //!
 //! Targets the eProsima Micro-XRCE-DDS-Agent TCP transport (the format spoken
-//! by `microros/micro-ros-agent`). See `/.claude/xrce_dds_protocol.md` for the
-//! wire-format reference; this crate's surface is ROS2-flavoured:
+//! by `microros/micro-ros-agent`).  See `/.claude/xrce_dds_protocol.md` for
+//! the wire-format reference; this crate's surface is ROS2-flavoured:
 //!
 //! ```ignore
-//! use micro_xrce_dds_rs::{Session, msg};
+//! use micro_xrce_dds_rs::{Runtime, RuntimeConfig, Context, client_key};
 //!
-//! let mut session = Session::connect(socket, 0x81, [0xBA, 0xCE, 0xA1, 0x05]).await?;
-//! let node = session.create_node("my_node").await?;
-//! let pub_hi = session.create_publisher::<msg::std_msgs::String>(&node, "/hello").await?;
-//! session.publish(&pub_hi, &msg::std_msgs::String("hi")).await?;
+//! static RUNTIME: Runtime = Runtime::new();
+//!
+//! #[embassy_executor::task]
+//! async fn my_node(ctx: Context) -> ! {
+//!     let node = ctx.create_node("my_node").await.unwrap();
+//!     let pub_hi = node.create_publisher::<msg::std_msgs::String>("/hello").await.unwrap();
+//!     loop {
+//!         pub_hi.publish(&msg::std_msgs::String("hi")).await.ok();
+//!         Timer::after_millis(1000).await;
+//!     }
+//! }
 //! ```
-//!
-//! Subscriptions follow a `&'static`-slot pattern (see the [`Subscription`]
-//! docs) — the slot is registered with the session, and the user task awaits
-//! samples on `slot.recv()` while a separate task drives `session.spin()`.
-//!
-//! ## v0.2 Runtime layer (in progress)
-//!
-//! A new [`Runtime`] / [`Context`] API is being built alongside the legacy
-//! `Session` API.  `Session` will be removed in the v0.2 release once all
-//! examples have been migrated (Phase 5 of the roadmap).
 
 #![no_std]
 
@@ -35,7 +32,6 @@ pub mod protocol;
 pub mod publisher;
 pub mod ros2;
 pub mod rt;
-pub mod session;
 pub mod subscription;
 
 pub use error::Error;
@@ -43,7 +39,6 @@ pub use message::Message;
 pub use node::Node;
 pub use publisher::Publisher;
 pub use rt::{Context, Executor, Runtime, RuntimeConfig};
-pub use session::Session;
 pub use subscription::{Subscription, SubscriptionSlot};
 
 /// Convenience re-export so users can write `msg::std_msgs::Float32`.
@@ -61,7 +56,6 @@ pub use ros2::msg;
 ///
 /// ```ignore
 /// const KEY: [u8; 4] = micro_xrce_dds_rs::client_key_from_app_id("microros_hello");
-/// let session = Session::connect(socket, 0x81, KEY).await?;
 /// ```
 pub const fn client_key_from_app_id(id: &str) -> [u8; 4] {
     // FNV-1a 32-bit
@@ -82,7 +76,6 @@ pub const fn client_key_from_app_id(id: &str) -> [u8; 4] {
 ///
 /// ```ignore
 /// let key: [u8; 4] = micro_xrce_dds_rs::client_key!();
-/// let session = Session::connect(socket, 0x81, key).await?;
 /// ```
 #[macro_export]
 macro_rules! client_key {

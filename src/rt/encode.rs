@@ -9,11 +9,16 @@ use heapless::String as HString;
 
 use crate::{error::Error, protocol::*};
 
+#[cfg(feature = "defmt")]
+use defmt::error;
+#[cfg(not(feature = "defmt"))]
+macro_rules! error { ($($t:tt)*) => {}; }
+
 // ── Public constants ──────────────────────────────────────────────────────────
 
 /// Maximum byte length of a ROS2 topic name (after `rt/` prefix expansion)
 /// stored in the XML entity description.
-pub(crate) const TOPIC_NAME_MAX: usize = 96;
+pub const TOPIC_NAME_MAX: usize = 96;
 
 // ── Header length helper ──────────────────────────────────────────────────────
 
@@ -22,7 +27,7 @@ pub(crate) const TOPIC_NAME_MAX: usize = 96;
 /// Sessions with `session_id >= SESSION_ID_WITHOUT_CLIENT_KEY (0x80)` omit the
 /// 4-byte `client_key` from the header.
 #[inline]
-pub(crate) fn msg_header_len(session_id: u8) -> usize {
+pub fn msg_header_len(session_id: u8) -> usize {
     if session_id < SESSION_ID_WITHOUT_CLIENT_KEY {
         8
     } else {
@@ -33,7 +38,7 @@ pub(crate) fn msg_header_len(session_id: u8) -> usize {
 // ── Topic name helper ─────────────────────────────────────────────────────────
 
 /// Convert a ROS2 topic name (`/foo/bar`) to its DDS form (`rt/foo/bar`).
-pub(crate) fn ros2_topic_name<const N: usize>(topic: &str) -> Result<HString<N>, Error> {
+pub fn ros2_topic_name<const N: usize>(topic: &str) -> Result<HString<N>, Error> {
     let mut s = HString::<N>::new();
     let body = topic.strip_prefix('/').unwrap_or(topic);
     s.push_str("rt/").map_err(|_| Error::BufferTooSmall)?;
@@ -44,7 +49,7 @@ pub(crate) fn ros2_topic_name<const N: usize>(topic: &str) -> Result<HString<N>,
 // ── CREATE_CLIENT ─────────────────────────────────────────────────────────────
 
 /// Build a `CREATE_CLIENT` message into `buf`. Returns the number of bytes written.
-pub(crate) fn build_create_client(
+pub fn build_create_client(
     buf: &mut [u8],
     session_id: u8,
     client_key: &[u8; 4],
@@ -83,7 +88,7 @@ pub(crate) fn build_create_client(
 // ── CREATE_PARTICIPANT ────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_create_participant(
+pub fn encode_create_participant(
     buf: &mut [u8],
     session_id: u8,
     seq: u16,
@@ -121,7 +126,7 @@ pub(crate) fn encode_create_participant(
 // ── CREATE with parent (Publisher / Subscriber / Topic / DataWriter / DataReader) ──
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_create_with_parent(
+pub fn encode_create_with_parent(
     buf: &mut [u8],
     session_id: u8,
     seq: u16,
@@ -159,7 +164,7 @@ pub(crate) fn encode_create_with_parent(
 
 // ── READ_DATA ─────────────────────────────────────────────────────────────────
 
-pub(crate) fn encode_read_data(
+pub fn encode_read_data(
     buf: &mut [u8],
     session_id: u8,
     seq: u16,
@@ -199,7 +204,7 @@ pub(crate) fn encode_read_data(
 ///
 /// `buf` must span the full frame `[0..prefix + body_len]`; the caller writes
 /// the CDR body first, then passes the whole slice here.
-pub(crate) fn finalize_write_data_headers(
+pub fn finalize_write_data_headers(
     buf: &mut [u8],
     session_id: u8,
     seq: u16,
@@ -219,6 +224,32 @@ pub(crate) fn finalize_write_data_headers(
     b.bytes(&request_id_be_bytes(0)); // req_id = 0: WRITE_DATA is fire-and-forget
     b.bytes(&object_id_be_bytes(dw_oid));
     // CDR body already in buf[b.pos()..].
+}
+
+// ── STATUS_AGENT parser ───────────────────────────────────────────────────────
+
+/// Parse the STATUS_AGENT reply to CREATE_CLIENT.
+///
+/// Returns `Ok(())` on success, `Err(UnexpectedReply)` if the message is
+/// malformed or not a STATUS_AGENT, `Err(AgentRejected(status))` if the
+/// agent replied with an error status.
+pub(crate) fn parse_status_agent(msg: &[u8], session_id: u8) -> Result<(), Error> {
+    let hdr_len = msg_header_len(session_id);
+    if msg.len() < hdr_len + 4 + 2 {
+        error!("[rt] STATUS_AGENT too short: {}", msg.len());
+        return Err(Error::UnexpectedReply);
+    }
+    let submsg_id = msg[hdr_len];
+    if submsg_id != SUBMSG_STATUS_AGENT {
+        error!("[rt] expected STATUS_AGENT (4), got 0x{:02X}", submsg_id);
+        return Err(Error::UnexpectedReply);
+    }
+    let payload = &msg[hdr_len + 4..];
+    let status = payload[0];
+    if status != STATUS_OK {
+        return Err(Error::AgentRejected(status));
+    }
+    Ok(())
 }
 
 // ── Internal: session header ──────────────────────────────────────────────────

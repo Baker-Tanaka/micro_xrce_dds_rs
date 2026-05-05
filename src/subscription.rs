@@ -57,7 +57,7 @@ where
         self.inbox.try_receive().ok()
     }
 
-    pub(crate) fn set_dr_id(&self, id: u16) {
+    pub fn set_dr_id(&self, id: u16) {
         self.dr_id.store(id, Ordering::Release);
     }
 }
@@ -97,4 +97,27 @@ where
             .try_send(msg)
             .map_err(|_| Error::SubscriptionOverflow)
     }
+}
+
+/// Declare a `'static` subscription slot.
+///
+/// ```ignore
+/// subscription_slot!(static TEMP_SUB: Float32, depth = 4);
+/// // or with default depth (4):
+/// subscription_slot!(static TEMP_SUB: Float32);
+///
+/// // Then in your node task:
+/// node.create_subscription("/temperature", &TEMP_SUB).await?;
+/// loop {
+///     let msg = TEMP_SUB.recv().await;
+/// }
+/// ```
+#[macro_export]
+macro_rules! subscription_slot {
+    (static $name:ident : $M:ty , depth = $N:expr) => {
+        static $name: $crate::Subscription<$M, $N> = $crate::Subscription::new();
+    };
+    (static $name:ident : $M:ty) => {
+        static $name: $crate::Subscription<$M, 4> = $crate::Subscription::new();
+    };
 }

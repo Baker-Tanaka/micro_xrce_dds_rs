@@ -8,7 +8,7 @@
 use embassy_futures::select::{select, Either};
 use embedded_io_async::{Read, Write};
 
-use crate::{error::Error, framing, protocol::*, rt::inner::SessionInner};
+use crate::{error::Error, framing, protocol::*, rt::{encode::msg_header_len, inner::SessionInner}};
 
 #[cfg(feature = "defmt")]
 use defmt::{debug, warn};
@@ -181,11 +181,3 @@ async fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> Result<(), Error>
     Ok(())
 }
 
-#[inline]
-fn msg_header_len(session_id: u8) -> usize {
-    if session_id < SESSION_ID_WITHOUT_CLIENT_KEY {
-        8
-    } else {
-        4
-    }
-}

@@ -26,3 +26,8 @@ portable-atomic = { version = "1", features = ["unsafe-assume-single-core"] }
 
 [target.'cfg(not(all(target_arch = "arm", target_os = "none")))'.dependencies]
 portable-atomic = { version = "1" }
+
+[dev-dependencies]
+# Provides the critical-section implementation for host (x86_64) integration
+# tests that use embassy_sync primitives (Channel / Mutex).
+critical-section = { version = "1", features = ["std"] }
