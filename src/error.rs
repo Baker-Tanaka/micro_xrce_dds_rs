@@ -23,6 +23,12 @@ pub enum Error {
     Timeout,
     /// A `Context` method was called before `Runtime::start()` completed.
     NotStarted,
+    /// Service-call response did not arrive in time.
+    ServiceCallTimeout,
+    /// Service slot inbox overflowed (too many pending requests on a server).
+    ServiceOverflow,
+    /// A new request arrived but the service-server inbox is at capacity.
+    NoServiceSlot,
 }
 
 #[cfg(feature = "defmt")]
@@ -40,6 +46,9 @@ impl defmt::Format for Error {
             Error::TooManySubscriptions => defmt::write!(f, "TooManySubscriptions"),
             Error::Timeout => defmt::write!(f, "Timeout"),
             Error::NotStarted => defmt::write!(f, "NotStarted"),
+            Error::ServiceCallTimeout => defmt::write!(f, "ServiceCallTimeout"),
+            Error::ServiceOverflow => defmt::write!(f, "ServiceOverflow"),
+            Error::NoServiceSlot => defmt::write!(f, "NoServiceSlot"),
         }
     }
 }

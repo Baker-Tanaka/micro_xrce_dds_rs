@@ -58,6 +58,21 @@ impl<'a> CdrWriter<'a> {
         self.raw(&v.to_le_bytes());
     }
 
+    pub fn i64_val(&mut self, v: i64) {
+        self.align(8);
+        self.raw(&v.to_le_bytes());
+    }
+
+    pub fn u64_val(&mut self, v: u64) {
+        self.align(8);
+        self.raw(&v.to_le_bytes());
+    }
+
+    /// Write `N` raw bytes with no alignment (CDR `octet[N]`).
+    pub fn bytes_raw(&mut self, b: &[u8]) {
+        self.raw(b);
+    }
+
     /// CDR string: u32 length (including null terminator) + bytes + '\0'.
     /// The u32 length field is 4-byte aligned before writing.
     pub fn string(&mut self, s: &str) {

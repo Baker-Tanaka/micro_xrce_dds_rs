@@ -22,6 +22,7 @@
 
 #![no_std]
 
+pub mod action;
 pub mod cdr;
 pub mod cdr_reader;
 pub mod error;
@@ -32,6 +33,7 @@ pub mod protocol;
 pub mod publisher;
 pub mod ros2;
 pub mod rt;
+pub mod service;
 pub mod subscription;
 
 pub use error::Error;
@@ -39,6 +41,11 @@ pub use message::Message;
 pub use node::Node;
 pub use publisher::Publisher;
 pub use rt::{Context, Executor, Runtime, RuntimeConfig};
+pub use action::{Action, ActionClient, ActionServer, GoalId};
+pub use service::{
+    SampleIdentity, Service, ServiceClient, ServiceClientHandles, ServiceClientSlot,
+    ServiceRequest, ServiceServer, ServiceServerSlot,
+};
 pub use subscription::{Subscription, SubscriptionSlot};
 
 /// Convenience re-export so users can write `msg::std_msgs::Float32`.

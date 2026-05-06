@@ -33,6 +33,10 @@ use crate::{
         inner::{Frame, FRAME_BUF_SIZE},
         Context,
     },
+    service::{
+        derive_writer_guid, Service, ServiceClient, ServiceClientHandles, ServiceServer,
+        ServiceServerSlot,
+    },
     subscription::{Subscription, SubscriptionSlot},
 };
 
@@ -258,5 +262,129 @@ impl Node {
         msg: &M,
     ) -> Result<(), Error> {
         pub_.publish(msg).await
+    }
+
+    /// Create a ROS2 service client for service `S`.  Allocates a `REQUESTER`
+    /// entity on the agent and registers `handles.slot` in the dispatch
+    /// table so incoming replies are routed to it.
+    ///
+    /// `handles` must be a `&'static ServiceClientHandles<S>` — declare one
+    /// with `static FOO: ServiceClientHandles<S> = ServiceClientHandles::new();`
+    /// or via the [`crate::service_client_slot!`] macro.
+    pub async fn create_service_client<S: Service>(
+        &self,
+        handles: &'static ServiceClientHandles<S>,
+    ) -> Result<ServiceClient<S>, Error> {
+        let inner = self.ctx.inner;
+
+        // Capacity check on the dispatch table before sending CREATE.
+        {
+            let subs = inner.subs.lock().await;
+            if subs.is_full() {
+                return Err(Error::TooManySubscriptions);
+            }
+        }
+
+        let participant_oid = object_id(self.participant_idx, ENTITY_PARTICIPANT);
+
+        // Use the DR allocator for requester index — its only purpose is to
+        // keep counters monotonic.  Idx is shared across DR/REQUESTER/REPLIER.
+        let requester_idx = inner.alloc_dr();
+        let requester_oid = object_id(requester_idx, ENTITY_REQUESTER);
+
+        let mut xml = HString::<320>::new();
+        let _ = write!(
+            xml,
+            "<dds><requester><service_name>{}</service_name><request_type>{}</request_type><reply_type>{}</reply_type></requester></dds>",
+            S::SERVICE_NAME,
+            S::REQUEST_TYPE_NAME,
+            S::RESPONSE_TYPE_NAME,
+        );
+        let xml_snap = xml;
+        send_create_and_wait(inner, move |sid, key, seq, req, buf| {
+            encode_create_with_parent(
+                buf, sid, seq, &key, req, requester_oid, ENTITY_REQUESTER,
+                xml_snap.as_str(), participant_oid,
+            )
+        })
+        .await?;
+
+        // Register the slot for dispatch BEFORE returning so the executor
+        // can route any reply that arrives.
+        handles.slot.set_requester_oid(requester_oid);
+        inner
+            .subs
+            .lock()
+            .await
+            .push(&handles.slot as &'static dyn SubscriptionSlot)
+            .map_err(|_| Error::TooManySubscriptions)?;
+
+        let writer_guid = derive_writer_guid(&inner.client_key(), requester_oid);
+        Ok(ServiceClient::new(
+            requester_oid,
+            self.ctx,
+            handles,
+            writer_guid,
+        ))
+    }
+
+    /// Create a ROS2 service server for service `S`.  Allocates a `REPLIER`
+    /// entity on the agent and registers `slot` in the dispatch table so
+    /// incoming requests are routed to it.
+    pub async fn create_service_server<S: Service, const N: usize>(
+        &self,
+        slot: &'static ServiceServerSlot<S, N>,
+    ) -> Result<ServiceServer<S, N>, Error> {
+        let inner = self.ctx.inner;
+
+        {
+            let subs = inner.subs.lock().await;
+            if subs.is_full() {
+                return Err(Error::TooManySubscriptions);
+            }
+        }
+
+        let participant_oid = object_id(self.participant_idx, ENTITY_PARTICIPANT);
+
+        let replier_idx = inner.alloc_dr();
+        let replier_oid = object_id(replier_idx, ENTITY_REPLIER);
+
+        let mut xml = HString::<320>::new();
+        let _ = write!(
+            xml,
+            "<dds><replier><service_name>{}</service_name><request_type>{}</request_type><reply_type>{}</reply_type></replier></dds>",
+            S::SERVICE_NAME,
+            S::REQUEST_TYPE_NAME,
+            S::RESPONSE_TYPE_NAME,
+        );
+        let xml_snap = xml;
+        send_create_and_wait(inner, move |sid, key, seq, req, buf| {
+            encode_create_with_parent(
+                buf, sid, seq, &key, req, replier_oid, ENTITY_REPLIER,
+                xml_snap.as_str(), participant_oid,
+            )
+        })
+        .await?;
+
+        slot.set_replier_oid(replier_oid);
+        inner
+            .subs
+            .lock()
+            .await
+            .push(slot as &'static dyn SubscriptionSlot)
+            .map_err(|_| Error::TooManySubscriptions)?;
+
+        // READ_DATA so the agent starts streaming requests at us.
+        let session_id = inner.session_id();
+        let client_key = inner.client_key();
+        let seq = inner.next_seq();
+        let req = inner.next_req();
+        let mut frame = Frame::zero();
+        let len = encode_read_data(&mut frame.bytes, session_id, seq, &client_key, req, replier_oid)?;
+        debug_assert!(len <= FRAME_BUF_SIZE);
+        frame.len = len;
+        inner.tx_channel.send(frame).await;
+
+        Ok(ServiceServer::new(replier_oid, self.ctx, slot))
     }
 }

@@ -1,7 +1,7 @@
 //! [`Subscription<M, N>`] — typed subscription handle backed by an async
 //! channel inbox.
 //!
-//! Subscriptions are registered with [`crate::Session::create_subscription`]
+//! Subscriptions are registered with [`crate::Node::create_subscription`]
 //! by passing a `&'static Subscription<M, N>`; the canonical pattern is to
 //! declare the slot in a `static` via `static_cell::StaticCell` and call
 //! [`Subscription::new()`] (a `const fn`) to initialize it.
@@ -25,7 +25,7 @@ pub struct Subscription<M: Message, const N: usize = 4>
 where
     M: Send + 'static,
 {
-    /// DataReader object_id. Set during [`crate::Session::create_subscription`];
+    /// DataReader object_id. Set during [`crate::Node::create_subscription`];
     /// `0` until then (and never matches an incoming DATA submessage).
     dr_id: AtomicU16,
     inbox: Channel<CriticalSectionRawMutex, M, N>,
@@ -38,7 +38,7 @@ where
 {
     /// Construct an empty subscription slot. `const fn` so it can live in a
     /// `static`. The `dr_id` is filled in when
-    /// [`crate::Session::create_subscription`] registers this slot.
+    /// [`crate::Node::create_subscription`] registers this slot.
     pub const fn new() -> Self {
         Self {
             dr_id: AtomicU16::new(0),

@@ -112,8 +112,12 @@ pub struct SessionInner {
     /// each incoming DATA frame (linear scan).
     pub(crate) subs: Mutex<CriticalSectionRawMutex, HVec<&'static dyn SubscriptionSlot, MAX_SUBS>>,
 
-    // ── Disconnect flag ───────────────────────────────────────────────────────
+    // ── Disconnect flag + supervisor signal ───────────────────────────────────
     pub(crate) disconnected: AtomicBool,
+    /// Fired by the Executor on transport failure.  A single supervisor task
+    /// can `await` this via [`super::Runtime::wait_for_disconnect`] to drive
+    /// a reconnect (v0.5).
+    pub(crate) disconnect_signal: Signal<CriticalSectionRawMutex, ()>,
 }
 
 impl SessionInner {
@@ -136,6 +140,7 @@ impl SessionInner {
             tx_channel: Channel::new(),
             subs: Mutex::new(HVec::new()),
             disconnected: AtomicBool::new(false),
+            disconnect_signal: Signal::new(),
         }
     }
 
@@ -205,6 +210,15 @@ impl SessionInner {
 
     pub(crate) fn set_disconnected(&self) {
         self.disconnected.store(true, Ordering::Release);
+        self.disconnect_signal.signal(());
+    }
+
+    /// Clear the disconnect flag.  Used by [`super::Runtime::resume`] after a
+    /// successful re-handshake.  Re-arms the disconnect signal so a future
+    /// transport failure can be detected.
+    pub(crate) fn clear_disconnected(&self) {
+        self.disconnect_signal.reset();
+        self.disconnected.store(false, Ordering::Release);
     }
 
     // ── Creation mailbox helpers ──────────────────────────────────────────────

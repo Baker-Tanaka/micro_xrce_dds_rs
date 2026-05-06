@@ -226,6 +226,22 @@ pub fn finalize_write_data_headers(
     // CDR body already in buf[b.pos()..].
 }
 
+// ── Service WRITE_DATA finalizer ──────────────────────────────────────────────
+
+/// Identical wire format to [`finalize_write_data_headers`] — service requests
+/// and replies are sent as ordinary WRITE_DATA submessages addressed to the
+/// requester / replier object_id.  This alias exists for documentation.
+#[inline]
+pub fn finalize_service_write_data(
+    buf: &mut [u8],
+    session_id: u8,
+    seq: u16,
+    client_key: &[u8; 4],
+    requester_or_replier_oid: u16,
+) {
+    finalize_write_data_headers(buf, session_id, seq, client_key, requester_or_replier_oid);
+}
+
 // ── STATUS_AGENT parser ───────────────────────────────────────────────────────
 
 /// Parse the STATUS_AGENT reply to CREATE_CLIENT.

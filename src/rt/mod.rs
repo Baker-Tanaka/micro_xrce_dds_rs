@@ -132,6 +132,89 @@ impl Runtime {
         let exec = Executor::new(&self.inner, transport);
         Ok((ctx, exec))
     }
+
+    /// Clear the disconnect flag without re-running the CREATE_CLIENT
+    /// handshake.  Normally [`Runtime::resume`] does this automatically;
+    /// exposed for tests and for callers that drive the protocol manually.
+    pub fn clear_disconnect(&'static self) {
+        self.inner.clear_disconnected();
+    }
+
+    /// Force the runtime into the disconnected state.
+    ///
+    /// Normally the Executor sets this internally on transport failure.
+    /// Exposed for application-level health checks (e.g. heartbeat timeout
+    /// detected from elsewhere) and for tests.  After calling this, awaiting
+    /// supervisors are unblocked and all `publish` / service calls return
+    /// `Error::Disconnected` until [`Runtime::resume`] succeeds.
+    pub fn force_disconnect(&'static self) {
+        self.inner.set_disconnected();
+    }
+
+    /// Wait until the Executor reports a transport failure.
+    ///
+    /// Resolves the first time `set_disconnected` fires after this call; the
+    /// signal is one-shot per disconnect cycle, so a single supervisor task
+    /// can drive a reconnect loop:
+    ///
+    /// ```ignore
+    /// loop {
+    ///     RUNTIME.wait_for_disconnect().await;
+    ///     // re-establish WiFi + TCP, build a fresh transport...
+    ///     match RUNTIME.resume(new_socket, config).await {
+    ///         Ok(exec) => spawner.spawn(xrce_exec(exec).unwrap()),
+    ///         Err(_)   => Timer::after_millis(2000).await,
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Only one task should await this at a time.  If the runtime is already
+    /// disconnected when called, returns immediately.
+    pub async fn wait_for_disconnect(&'static self) {
+        if self.inner.is_disconnected() {
+            return;
+        }
+        self.inner.disconnect_signal.wait().await;
+    }
+
+    /// Re-establish the XRCE-DDS session on a freshly-connected transport.
+    ///
+    /// Replays `CREATE_CLIENT` with the same `client_key` so the agent
+    /// recognises this as a session resume — DDS entities created in the
+    /// previous cycle are retained, so user tasks can keep using their
+    /// existing `Publisher` / `Subscription` / `ServiceClient` handles.
+    /// Pending CREATEs in flight are aborted with [`Error::Disconnected`]
+    /// before the resume.
+    ///
+    /// On success returns a fresh [`Executor`] which the caller spawns on
+    /// the same task slot the previous Executor lived in.
+    pub async fn resume<T: Read + Write>(
+        &'static self,
+        mut transport: T,
+        config: RuntimeConfig,
+    ) -> Result<Executor<T>, Error> {
+        let mut tx_buf = [0u8; 64];
+        let n = encode::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
+        framing::write_framed(&mut transport, &tx_buf[..n]).await?;
+
+        let mut rx_buf = [0u8; 128];
+        let reply = framing::read_framed(&mut transport, &mut rx_buf).await?;
+        encode::parse_status_agent(reply, config.session_id)?;
+
+        // Confirm session identity is unchanged (resume contract).
+        self.inner.set_session_identity(config.session_id, config.client_key);
+        // Drain any outgoing frames that were queued after the disconnect —
+        // they refer to obsolete sequence numbers / headers.
+        while self.inner.tx_channel.try_receive().is_ok() {}
+        // Ensure no CREATE waiter is left armed against the dead executor.
+        self.inner.creation_signal.signal(Err(Error::Disconnected));
+        self.inner.disarm_creation();
+        self.inner.creation_signal.reset();
+        // Re-arm publish path.
+        self.inner.clear_disconnected();
+
+        Ok(Executor::new(&self.inner, transport))
+    }
 }
 
 // ── Context ───────────────────────────────────────────────────────────────────

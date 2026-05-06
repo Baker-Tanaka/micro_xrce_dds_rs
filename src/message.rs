@@ -17,7 +17,7 @@ pub trait Message: Sized {
     const TYPE_NAME: &'static str;
 
     /// Worst-case CDR-serialized body size in bytes (no encap header). Used
-    /// by [`crate::Session`] to size internal scratch buffers and reject
+    /// by [`crate::Node`] to size internal scratch buffers and reject
     /// over-large messages early.
     const MAX_SERIALIZED_SIZE: usize;
 

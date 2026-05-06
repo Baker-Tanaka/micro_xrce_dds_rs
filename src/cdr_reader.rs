@@ -66,6 +66,24 @@ impl<'a> CdrReader<'a> {
         Ok(f64::from_le_bytes(bytes.try_into().unwrap()))
     }
 
+    pub fn i64_val(&mut self) -> Result<i64, Error> {
+        self.align(8);
+        let bytes = self.take(8)?;
+        Ok(i64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    pub fn u64_val(&mut self) -> Result<u64, Error> {
+        self.align(8);
+        let bytes = self.take(8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    /// Read `N` raw bytes with no alignment (CDR `octet[N]`).
+    pub fn bytes_array<const N: usize>(&mut self) -> Result<[u8; N], Error> {
+        let bytes = self.take(N)?;
+        Ok(bytes.try_into().unwrap())
+    }
+
     pub fn f64_array<const N: usize>(&mut self) -> Result<[f64; N], Error> {
         self.align(8);
         let mut out = [0.0; N];
