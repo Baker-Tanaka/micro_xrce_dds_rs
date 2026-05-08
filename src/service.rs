@@ -408,18 +408,25 @@ impl<S: Service, const N: usize> ServiceServer<S, N> {
 /// One pending service request received from a client.
 ///
 /// Holds the deserialized request plus the [`SampleIdentity`] needed to route
-/// the reply back to the originating client.
+/// the reply back to the originating client.  `reply` borrows `&self`, so the
+/// caller can `req.reply(&resp).await?;` then continue using `req.payload` —
+/// this is the pattern action-server `accept_next_goal` follows.
 pub struct ServiceRequest<S: Service> {
     pub identity: SampleIdentity,
     pub payload: S::Request,
-    replier_oid: u16,
-    ctx: Context,
+    pub(crate) replier_oid: u16,
+    pub(crate) ctx: Context,
 }
 
 impl<S: Service> ServiceRequest<S> {
     /// Reply with the given response payload.  The original `SampleIdentity`
     /// is echoed so the client can match it to the call that produced it.
-    pub async fn reply(self, resp: &S::Response) -> Result<(), Error> {
+    ///
+    /// Borrows `&self` rather than consuming it: idempotent retries are
+    /// safe (each call resends a fresh WRITE_DATA frame), and callers can
+    /// reply *before* unpacking `payload` if the response carries no fields
+    /// derived from the request.
+    pub async fn reply(&self, resp: &S::Response) -> Result<(), Error> {
         let inner = self.ctx.inner;
         if inner.is_disconnected() {
             return Err(Error::Disconnected);

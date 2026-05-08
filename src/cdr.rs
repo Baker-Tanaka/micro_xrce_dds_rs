@@ -73,6 +73,21 @@ impl<'a> CdrWriter<'a> {
         self.raw(b);
     }
 
+    /// Align the cursor to `n` bytes, padding with zeros.  Public so wrapper
+    /// types can align before each element of a CDR sequence.
+    pub fn align_to(&mut self, n: usize) {
+        self.align(n);
+    }
+
+    /// Write a CDR `sequence<i32>` from a slice — `u32` length prefix + each
+    /// element 4-byte aligned.
+    pub fn i32_seq(&mut self, items: &[i32]) {
+        self.u32_val(items.len() as u32);
+        for v in items {
+            self.i32_val(*v);
+        }
+    }
+
     /// CDR string: u32 length (including null terminator) + bytes + '\0'.
     /// The u32 length field is 4-byte aligned before writing.
     pub fn string(&mut self, s: &str) {

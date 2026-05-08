@@ -41,7 +41,12 @@ pub use message::Message;
 pub use node::Node;
 pub use publisher::Publisher;
 pub use rt::{Context, Executor, Runtime, RuntimeConfig};
-pub use action::{Action, ActionClient, ActionServer, GoalId};
+pub use action::{
+    AcceptedGoal, Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
+    CancelGoalRequest, CancelGoalResponse, CancelGoalSrv, FeedbackMessage, GetResultRequest,
+    GetResultResponse, GetResultSrv, GoalHandle, GoalId, GoalInfo, GoalStatus, GoalStatusArray,
+    SendGoalRequest, SendGoalResponse, SendGoalResponseFor, SendGoalSrv, Time,
+};
 pub use service::{
     SampleIdentity, Service, ServiceClient, ServiceClientHandles, ServiceClientSlot,
     ServiceRequest, ServiceServer, ServiceServerSlot,

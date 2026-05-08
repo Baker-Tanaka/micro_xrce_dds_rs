@@ -84,6 +84,28 @@ impl<'a> CdrReader<'a> {
         Ok(bytes.try_into().unwrap())
     }
 
+    /// Align the cursor to `n` bytes.  Public for sequence-of-struct readers.
+    pub fn align_to(&mut self, n: usize) {
+        self.align(n);
+    }
+
+    /// Read a CDR `sequence<i32>` into a heapless `Vec` capped at `CAP`.
+    /// Returns `Error::Deserialization` if the agent sent more elements than
+    /// the local cap allows.
+    pub fn i32_seq_into<const CAP: usize>(
+        &mut self,
+    ) -> Result<heapless::Vec<i32, CAP>, Error> {
+        let n = self.u32_val()? as usize;
+        if n > CAP {
+            return Err(Error::Deserialization);
+        }
+        let mut v: heapless::Vec<i32, CAP> = heapless::Vec::new();
+        for _ in 0..n {
+            v.push(self.i32_val()?).ok();
+        }
+        Ok(v)
+    }
+
     pub fn f64_array<const N: usize>(&mut self) -> Result<[f64; N], Error> {
         self.align(8);
         let mut out = [0.0; N];

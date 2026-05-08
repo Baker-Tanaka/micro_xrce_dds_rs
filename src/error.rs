@@ -29,6 +29,11 @@ pub enum Error {
     ServiceOverflow,
     /// A new request arrived but the service-server inbox is at capacity.
     NoServiceSlot,
+    /// `ActionClient::send_goal` got `accepted = false` from the action server.
+    GoalRejected,
+    /// `GoalHandle::await_result` finished with a non-`STATUS_SUCCEEDED`
+    /// status code (carried as the wrapped value).
+    GoalNotSucceeded(i8),
 }
 
 #[cfg(feature = "defmt")]
@@ -49,6 +54,8 @@ impl defmt::Format for Error {
             Error::ServiceCallTimeout => defmt::write!(f, "ServiceCallTimeout"),
             Error::ServiceOverflow => defmt::write!(f, "ServiceOverflow"),
             Error::NoServiceSlot => defmt::write!(f, "NoServiceSlot"),
+            Error::GoalRejected => defmt::write!(f, "GoalRejected"),
+            Error::GoalNotSucceeded(s) => defmt::write!(f, "GoalNotSucceeded({})", s),
         }
     }
 }

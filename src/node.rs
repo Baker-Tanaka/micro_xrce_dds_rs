@@ -33,6 +33,10 @@ use crate::{
         inner::{Frame, FRAME_BUF_SIZE},
         Context,
     },
+    action::{
+        Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
+        CancelGoalSrv, FeedbackMessage, GetResultSrv, SendGoalSrv,
+    },
     service::{
         derive_writer_guid, Service, ServiceClient, ServiceClientHandles, ServiceServer,
         ServiceServerSlot,
@@ -386,5 +390,108 @@ impl Node {
         inner.tx_channel.send(frame).await;
 
         Ok(ServiceServer::new(replier_oid, self.ctx, slot))
+    }
+
+    /// Create a ROS2 action client for action `A`.
+    ///
+    /// Composes the underlying entities required by a ROS2 action:
+    /// - 1 REQUESTER for the `send_goal` service (via `handles.send_goal`).
+    /// - 1 REQUESTER for the `get_result` service (via `handles.get_result`).
+    /// - 1 DataReader subscribed to the feedback topic
+    ///   (`A::FEEDBACK_TOPIC_NAME`), backed by `feedback_slot`.
+    ///
+    /// `handles` and `feedback_slot` must both be `&'static`.  Typical wiring:
+    ///
+    /// ```ignore
+    /// static FIB_HANDLES: ActionClientHandles<Fibonacci> = ActionClientHandles::new();
+    /// subscription_slot!(static FIB_FB: FeedbackMessage<Fibonacci>, depth = 4);
+    ///
+    /// let client = node.create_action_client(&FIB_HANDLES, &FIB_FB).await?;
+    /// let handle = client.send_goal(my_goal).await?;
+    /// let result = handle.await_result().await?;
+    /// ```
+    ///
+    /// CancelGoal service / GoalStatusArray topic are *not* created in this
+    /// release — `GoalHandle::cancel` returns `Error::NotStarted` until
+    /// v0.4-rc1 Phase 4 ships.
+    pub async fn create_action_client<A: Action, const FB_N: usize>(
+        &self,
+        handles: &'static ActionClientHandles<A>,
+        feedback_slot: &'static Subscription<FeedbackMessage<A>, FB_N>,
+    ) -> Result<ActionClient<A, FB_N>, Error> {
+        // 1. send_goal service client.
+        let send_goal_client = self
+            .create_service_client::<SendGoalSrv<A>>(&handles.send_goal)
+            .await?;
+
+        // 2. get_result service client.
+        let get_result_client = self
+            .create_service_client::<GetResultSrv<A>>(&handles.get_result)
+            .await?;
+
+        // 3. cancel_goal service client.
+        let cancel_goal_client = self
+            .create_service_client::<CancelGoalSrv<A>>(&handles.cancel_goal)
+            .await?;
+
+        // 4. feedback subscription — the create_subscription path performs its
+        //    own CREATE_TOPIC + CREATE_DATAREADER + READ_DATA.
+        self.create_subscription::<FeedbackMessage<A>, FB_N>(
+            A::FEEDBACK_TOPIC_NAME,
+            feedback_slot,
+        )
+        .await?;
+
+        let client_key = self.ctx.inner.client_key();
+        let action_idx = send_goal_client.requester_oid();
+        Ok(ActionClient::new(
+            send_goal_client,
+            get_result_client,
+            cancel_goal_client,
+            feedback_slot,
+            handles,
+            client_key,
+            action_idx,
+        ))
+    }
+
+    /// Create a ROS2 action server for action `A`.
+    ///
+    /// Composes the server-side entities of a ROS2 action:
+    /// - 3 REPLIER entities (`send_goal`, `get_result`, `cancel_goal`),
+    ///   backed by the [`ActionServerHandles`] inbox slots.
+    /// - 1 DataWriter on the feedback topic (`A::FEEDBACK_TOPIC_NAME`),
+    ///   exposed through [`ActionServer`]'s internal `Publisher`.
+    ///
+    /// Status topic publishing is not wired in v0.4-rc1 — the server signals
+    /// terminal goal state through `GetResult` replies, which the ROS2
+    /// `action_client` interprets correctly.
+    pub async fn create_action_server<
+        A: Action,
+        const SG_N: usize,
+        const GR_N: usize,
+        const CG_N: usize,
+    >(
+        &self,
+        handles: &'static ActionServerHandles<A, SG_N, GR_N, CG_N>,
+    ) -> Result<ActionServer<A, SG_N, GR_N, CG_N>, Error> {
+        let send_goal_server = self
+            .create_service_server::<SendGoalSrv<A>, SG_N>(&handles.send_goal)
+            .await?;
+        let get_result_server = self
+            .create_service_server::<GetResultSrv<A>, GR_N>(&handles.get_result)
+            .await?;
+        let cancel_goal_server = self
+            .create_service_server::<CancelGoalSrv<A>, CG_N>(&handles.cancel_goal)
+            .await?;
+        let feedback_pub = self
+            .create_publisher::<FeedbackMessage<A>>(A::FEEDBACK_TOPIC_NAME)
+            .await?;
+        Ok(ActionServer::new(
+            send_goal_server,
+            get_result_server,
+            cancel_goal_server,
+            feedback_pub,
+        ))
     }
 }
