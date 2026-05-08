@@ -1,30 +1,29 @@
-//! ROS2 Action support — **v0.4-rc1 wire types and Service composition**.
+//! ROS2 Action support — wire types and Service composition.
 //!
 //! A ROS2 action decomposes into **3 services** and **2 topics**:
 //!
-//! | Component        | DDS entity                                                  |
-//! | ---------------- | ----------------------------------------------------------- |
-//! | `send_goal`      | service `<action>/_action/send_goal`                        |
-//! | `cancel_goal`    | service `<action>/_action/cancel_goal`                      |
-//! | `get_result`     | service `<action>/_action/get_result`                       |
-//! | `feedback`       | topic   `<action>/_action/feedback`                         |
-//! | `status`         | topic   `<action>/_action/status`                           |
+//! | Component     | DDS entity                              |
+//! | ------------- | --------------------------------------- |
+//! | `send_goal`   | service `<action>/_action/send_goal`    |
+//! | `cancel_goal` | service `<action>/_action/cancel_goal`  |
+//! | `get_result`  | service `<action>/_action/get_result`   |
+//! | `feedback`    | topic   `<action>/_action/feedback`     |
+//! | `status`      | topic   `<action>/_action/status`       |
 //!
-//! v0.4-rc1 ships:
-//! - The wrapper messages every Action shares ([`SendGoalRequest`],
+//! This module provides:
+//! - The wrapper messages every action shares ([`SendGoalRequest`],
 //!   [`SendGoalResponse`], [`GetResultRequest`], [`GetResultResponse`],
-//!   [`FeedbackMessage`]) with full CDR (de)serialization.
-//! - The [`Action`] trait extended with the per-entity DDS type names.
-//! - [`SendGoalSrv`] / [`GetResultSrv`] — ZSTs that implement
-//!   [`crate::Service`] so an `ActionClient` can be assembled from two
-//!   `ServiceClient`s plus a feedback subscription.
-//! - [`ActionClientHandles`] — a `'static` bundle holding the
-//!   `ServiceClientHandles` for both inner services so the caller writes one
-//!   `static` per action client.
-//!
-//! End-to-end glue (`Node::create_action_client`, full `ActionClient::send_goal`
-//! composition, `ActionServer`) is still pending — once the wrappers and the
-//! Service impls are stable, the remaining work is plumbing.
+//!   [`FeedbackMessage`], [`CancelGoalRequest`], [`CancelGoalResponse`],
+//!   [`GoalStatusArray`]) with full CDR (de)serialization.
+//! - The [`Action`] trait with per-entity DDS type names.
+//! - [`SendGoalSrv`] / [`GetResultSrv`] / [`CancelGoalSrv`] — ZSTs implementing
+//!   [`crate::Service`] so the client/server halves compose from `ServiceClient` /
+//!   `ServiceServer` pairs.
+//! - [`ActionClient`] with [`ActionClient::send_goal`], [`GoalHandle::await_result`],
+//!   [`GoalHandle::next_feedback`], and [`GoalHandle::cancel`].
+//! - [`ActionServer`] with [`ActionServer::accept_next_goal`],
+//!   [`ActionServer::serve_cancels_for_active`], and
+//!   [`ActionServer::publish_status_for_active`].
 
 use core::marker::PhantomData;
 
