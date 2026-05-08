@@ -28,7 +28,7 @@
 
 use core::marker::PhantomData;
 
-use portable_atomic::{AtomicI64, Ordering};
+use portable_atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use crate::{
     cdr::CdrWriter,
@@ -823,10 +823,85 @@ impl<A: Action, const FB_N: usize> GoalHandle<A, FB_N> {
     }
 }
 
+// ── ActiveGoalCancelState (shared between ActionServer and AcceptedGoal) ────
+
+/// Lock-free single-flight cancel state for an [`ActionServer`].
+///
+/// `accept_next_goal` stores the active `goal_id` (split into two `u64`
+/// halves) and clears `cancel_requested`.  A separate cancel-server task
+/// (typically `ActionServer::serve_cancels_for_active`) compares incoming
+/// `CancelGoalRequest` goal_ids against the stored value and sets
+/// `cancel_requested` on a match.  The application reads the flag through
+/// [`AcceptedGoal::is_cancel_requested`] to cooperatively abort.
+pub struct ActiveGoalCancelState {
+    active_lo: AtomicU64,
+    active_hi: AtomicU64,
+    cancel_requested: AtomicBool,
+}
+
+impl ActiveGoalCancelState {
+    pub const fn new() -> Self {
+        Self {
+            active_lo: AtomicU64::new(0),
+            active_hi: AtomicU64::new(0),
+            cancel_requested: AtomicBool::new(false),
+        }
+    }
+
+    /// Mark `goal_id` as the active goal.  Normally invoked internally by
+    /// `ActionServer::accept_next_goal`; exposed for tests and for advanced
+    /// users driving the state machine manually.
+    pub fn set_active(&self, goal_id: GoalId) {
+        let mut lo_bytes = [0u8; 8];
+        let mut hi_bytes = [0u8; 8];
+        lo_bytes.copy_from_slice(&goal_id.0[0..8]);
+        hi_bytes.copy_from_slice(&goal_id.0[8..16]);
+        self.active_lo
+            .store(u64::from_le_bytes(lo_bytes), Ordering::Release);
+        self.active_hi
+            .store(u64::from_le_bytes(hi_bytes), Ordering::Release);
+        self.cancel_requested.store(false, Ordering::Release);
+    }
+
+    /// Mark the active slot as empty and clear any pending cancel flag.
+    pub fn clear_active(&self) {
+        self.active_lo.store(0, Ordering::Release);
+        self.active_hi.store(0, Ordering::Release);
+        self.cancel_requested.store(false, Ordering::Release);
+    }
+
+    /// Returns `true` if `goal_id` matches the currently-active goal.
+    pub fn matches(&self, goal_id: &GoalId) -> bool {
+        let mut lo_bytes = [0u8; 8];
+        let mut hi_bytes = [0u8; 8];
+        lo_bytes.copy_from_slice(&goal_id.0[0..8]);
+        hi_bytes.copy_from_slice(&goal_id.0[8..16]);
+        self.active_lo.load(Ordering::Acquire) == u64::from_le_bytes(lo_bytes)
+            && self.active_hi.load(Ordering::Acquire) == u64::from_le_bytes(hi_bytes)
+    }
+
+    pub fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::Acquire)
+    }
+
+    /// Mark the active goal as cancellation-requested.  Idempotent.
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Release);
+    }
+}
+
+impl Default for ActiveGoalCancelState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── ActionServerHandles ──────────────────────────────────────────────────────
 
 /// `'static` storage bundle for an [`ActionServer`].  Holds the three
-/// [`ServiceServerSlot`]s required by a ROS2 action.
+/// [`ServiceServerSlot`]s required by a ROS2 action plus the lock-free
+/// [`ActiveGoalCancelState`] that ties cancel-server replies to
+/// [`AcceptedGoal::is_cancel_requested`].
 ///
 /// Inbox depths default to 4 each; tune via the const generics if your
 /// scenario demands more concurrent service request buffering.
@@ -843,6 +918,7 @@ pub struct ActionServerHandles<
     pub send_goal: crate::service::ServiceServerSlot<SendGoalSrv<A>, SG_N>,
     pub get_result: crate::service::ServiceServerSlot<GetResultSrv<A>, GR_N>,
     pub cancel_goal: crate::service::ServiceServerSlot<CancelGoalSrv<A>, CG_N>,
+    pub cancel_state: ActiveGoalCancelState,
 }
 
 impl<A: Action, const SG_N: usize, const GR_N: usize, const CG_N: usize>
@@ -853,6 +929,7 @@ impl<A: Action, const SG_N: usize, const GR_N: usize, const CG_N: usize>
             send_goal: crate::service::ServiceServerSlot::new(),
             get_result: crate::service::ServiceServerSlot::new(),
             cancel_goal: crate::service::ServiceServerSlot::new(),
+            cancel_state: ActiveGoalCancelState::new(),
         }
     }
 }
@@ -898,6 +975,8 @@ pub struct ActionServer<
     get_result_server: crate::service::ServiceServer<GetResultSrv<A>, GR_N>,
     cancel_goal_server: crate::service::ServiceServer<CancelGoalSrv<A>, CG_N>,
     feedback_pub: crate::publisher::Publisher<FeedbackMessage<A>>,
+    status_pub: crate::publisher::Publisher<GoalStatusArray>,
+    cancel_state: &'static ActiveGoalCancelState,
 }
 
 impl<A: Action, const SG_N: usize, const GR_N: usize, const CG_N: usize> Clone
@@ -920,12 +999,16 @@ impl<A: Action, const SG_N: usize, const GR_N: usize, const CG_N: usize>
         get_result_server: crate::service::ServiceServer<GetResultSrv<A>, GR_N>,
         cancel_goal_server: crate::service::ServiceServer<CancelGoalSrv<A>, CG_N>,
         feedback_pub: crate::publisher::Publisher<FeedbackMessage<A>>,
+        status_pub: crate::publisher::Publisher<GoalStatusArray>,
+        cancel_state: &'static ActiveGoalCancelState,
     ) -> Self {
         Self {
             send_goal_server,
             get_result_server,
             cancel_goal_server,
             feedback_pub,
+            status_pub,
+            cancel_state,
         }
     }
 
@@ -942,24 +1025,25 @@ impl<A: Action, const SG_N: usize, const GR_N: usize, const CG_N: usize>
             accepted: true,
             stamp: Time::ZERO,
         });
-        // `reply` borrows `&self`, so we can reply first and then move the
-        // owned `goal` out of `req.payload`.
         req.reply(&resp).await?;
         let goal = req.payload.goal;
+        // Mark this as the active goal so `serve_cancels_for_active` can
+        // route incoming cancels to the AtomicBool that AcceptedGoal reads.
+        self.cancel_state.set_active(goal_id);
         Ok(AcceptedGoal {
             goal_id,
             goal,
             get_result_server: self.get_result_server,
             feedback_pub: self.feedback_pub,
+            cancel_state: self.cancel_state,
         })
     }
 
     /// Drain pending CancelGoal requests with a fixed `ERROR_REJECTED` reply.
     ///
-    /// Spawn this in its own task to keep the agent from buffering cancel
-    /// requests indefinitely.  Real cancel routing (matching `goal_id`,
-    /// transitioning the active goal, etc.) is future work; v0.4-rc1 simply
-    /// keeps the wire protocol moving.
+    /// Useful as a cheap "we don't support cancel" stub.  For active-goal-aware
+    /// cancel handling that wakes [`AcceptedGoal::is_cancel_requested`], use
+    /// [`ActionServer::serve_cancels_for_active`] instead.
     pub async fn serve_pending_cancels(&self) -> ! {
         loop {
             let req = self.cancel_goal_server.recv_request().await;
@@ -970,18 +1054,79 @@ impl<A: Action, const SG_N: usize, const GR_N: usize, const CG_N: usize>
             req.reply(&resp).await.ok();
         }
     }
+
+    /// Drain pending CancelGoal requests, comparing each request's `goal_id`
+    /// against the currently-active goal stored by `accept_next_goal`.
+    ///
+    /// On match: sets the cancel flag (visible via
+    /// [`AcceptedGoal::is_cancel_requested`]) and replies `ERROR_NONE`.
+    /// On mismatch: replies `ERROR_UNKNOWN_GOAL_ID`.
+    /// While no goal is active: replies `ERROR_GOAL_TERMINATED` for any
+    /// incoming cancel.
+    pub async fn serve_cancels_for_active(&self) -> ! {
+        loop {
+            let req = self.cancel_goal_server.recv_request().await;
+            let target = req.payload.goal_info.goal_id;
+            let return_code = if self.cancel_state.matches(&target) {
+                self.cancel_state.request_cancel();
+                cancel_response::ERROR_NONE
+            } else if self.cancel_state.matches(&GoalId([0u8; 16])) {
+                cancel_response::ERROR_GOAL_TERMINATED
+            } else {
+                cancel_response::ERROR_UNKNOWN_GOAL_ID
+            };
+            let resp = CancelGoalResponse {
+                return_code,
+                goals_canceling: heapless::Vec::new(),
+            };
+            req.reply(&resp).await.ok();
+        }
+    }
+
+    /// Publish a `GoalStatusArray` on `<action>/_action/status`.
+    ///
+    /// The action client subscribes to this topic to track goal lifecycle
+    /// transitions independently of the GetResult reply.  Many ROS2 clients
+    /// (rclpy, rclcpp) work without status publishing as long as GetResult
+    /// returns a terminal status — call this only if you need full fidelity.
+    pub async fn publish_status(&self, list: GoalStatusArray) -> Result<(), Error> {
+        self.status_pub.publish(&list).await
+    }
+
+    /// Convenience: build a `GoalStatusArray` containing a single
+    /// `GoalStatus` for the active goal at `status` and publish it.
+    pub async fn publish_status_for_active(
+        &self,
+        active_goal_id: GoalId,
+        status: i8,
+    ) -> Result<(), Error> {
+        let mut list: heapless::Vec<GoalStatus, MAX_STATUS_GOALS> = heapless::Vec::new();
+        list.push(GoalStatus {
+            goal_info: GoalInfo {
+                goal_id: active_goal_id,
+                stamp: Time::ZERO,
+            },
+            status,
+        })
+        .ok();
+        self.publish_status(GoalStatusArray { status_list: list })
+            .await
+    }
 }
 
 /// Accepted-goal handle returned by [`ActionServer::accept_next_goal`].
 ///
 /// Owns the path back to the originating client: a feedback `Publisher` and
 /// a `ServiceServer<GetResultSrv<A>>` it consumes one matching request from
-/// when the user calls `succeed` / `abort`.
+/// when the user calls `succeed` / `abort`.  Also holds a reference to the
+/// shared [`ActiveGoalCancelState`] so the user can poll
+/// [`AcceptedGoal::is_cancel_requested`] mid-execution.
 pub struct AcceptedGoal<A: Action, const GR_N: usize = 4> {
     pub goal_id: GoalId,
     pub goal: A::Goal,
     get_result_server: crate::service::ServiceServer<GetResultSrv<A>, GR_N>,
     feedback_pub: crate::publisher::Publisher<FeedbackMessage<A>>,
+    cancel_state: &'static ActiveGoalCancelState,
 }
 
 impl<A: Action, const GR_N: usize> AcceptedGoal<A, GR_N> {
@@ -995,6 +1140,13 @@ impl<A: Action, const GR_N: usize> AcceptedGoal<A, GR_N> {
             feedback,
         };
         self.feedback_pub.publish(&msg).await
+    }
+
+    /// Returns `true` if a `CancelGoal` request matching this goal_id has
+    /// been received by `serve_cancels_for_active`.  The application is
+    /// expected to poll this between work units and abort cooperatively.
+    pub fn is_cancel_requested(&self) -> bool {
+        self.cancel_state.is_cancel_requested()
     }
 
     /// Reply to the next `GetResult` request with `STATUS_SUCCEEDED` + result.
@@ -1011,13 +1163,24 @@ impl<A: Action, const GR_N: usize> AcceptedGoal<A, GR_N> {
         self.respond(goal_status::STATUS_ABORTED, result).await
     }
 
+    /// Reply to the next `GetResult` request with `STATUS_CANCELED` + result.
+    /// Use this after observing `is_cancel_requested() == true`.
+    pub async fn canceled(self, result: A::Result) -> Result<(), Error> {
+        self.respond(goal_status::STATUS_CANCELED, result).await
+    }
+
     async fn respond(self, status: i8, result: A::Result) -> Result<(), Error> {
         let req = self.get_result_server.recv_request().await;
         if req.payload.goal_id != self.goal_id {
+            // Don't leave the cancel-state pinned to a goal we're abandoning.
+            self.cancel_state.clear_active();
             return Err(Error::UnexpectedReply);
         }
         let resp = GetResultResponse::<A> { status, result };
-        req.reply(&resp).await
+        let r = req.reply(&resp).await;
+        // Goal lifecycle ends; release the cancel slot for the next goal.
+        self.cancel_state.clear_active();
+        r
     }
 }
 

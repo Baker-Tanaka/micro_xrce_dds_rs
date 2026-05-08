@@ -43,9 +43,9 @@ pub use publisher::Publisher;
 pub use rt::{Context, Executor, Runtime, RuntimeConfig};
 pub use action::{
     AcceptedGoal, Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
-    CancelGoalRequest, CancelGoalResponse, CancelGoalSrv, FeedbackMessage, GetResultRequest,
-    GetResultResponse, GetResultSrv, GoalHandle, GoalId, GoalInfo, GoalStatus, GoalStatusArray,
-    SendGoalRequest, SendGoalResponse, SendGoalResponseFor, SendGoalSrv, Time,
+    ActiveGoalCancelState, CancelGoalRequest, CancelGoalResponse, CancelGoalSrv, FeedbackMessage,
+    GetResultRequest, GetResultResponse, GetResultSrv, GoalHandle, GoalId, GoalInfo, GoalStatus,
+    GoalStatusArray, SendGoalRequest, SendGoalResponse, SendGoalResponseFor, SendGoalSrv, Time,
 };
 pub use service::{
     SampleIdentity, Service, ServiceClient, ServiceClientHandles, ServiceClientSlot,

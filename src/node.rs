@@ -35,7 +35,7 @@ use crate::{
     },
     action::{
         Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
-        CancelGoalSrv, FeedbackMessage, GetResultSrv, SendGoalSrv,
+        CancelGoalSrv, FeedbackMessage, GetResultSrv, GoalStatusArray, SendGoalSrv,
     },
     service::{
         derive_writer_guid, Service, ServiceClient, ServiceClientHandles, ServiceServer,
@@ -487,11 +487,16 @@ impl Node {
         let feedback_pub = self
             .create_publisher::<FeedbackMessage<A>>(A::FEEDBACK_TOPIC_NAME)
             .await?;
+        let status_pub = self
+            .create_publisher::<GoalStatusArray>(A::STATUS_TOPIC_NAME)
+            .await?;
         Ok(ActionServer::new(
             send_goal_server,
             get_result_server,
             cancel_goal_server,
             feedback_pub,
+            status_pub,
+            &handles.cancel_state,
         ))
     }
 }

@@ -694,6 +694,44 @@ fn action_server_types_are_copy() {
     assert_copy::<micro_xrce_dds_rs::ActionServer<Fib, 4, 4, 4>>();
 }
 
+// ── ActiveGoalCancelState lock-free primitives ──────────────────────────────
+
+#[test]
+fn active_goal_cancel_state_round_trip() {
+    use micro_xrce_dds_rs::ActiveGoalCancelState;
+
+    let s = ActiveGoalCancelState::new();
+    assert!(!s.is_cancel_requested());
+    assert!(!s.matches(&TEST_GOAL_ID));
+
+    s.set_active(TEST_GOAL_ID);
+    assert!(s.matches(&TEST_GOAL_ID));
+    // A different goal_id must not match.
+    assert!(!s.matches(&GoalId([0xFFu8; 16])));
+
+    // Cancel flag transitions.
+    assert!(!s.is_cancel_requested());
+    s.request_cancel();
+    assert!(s.is_cancel_requested());
+
+    // set_active resets the cancel flag.
+    s.set_active(GoalId([0x99u8; 16]));
+    assert!(!s.is_cancel_requested());
+
+    // clear_active wipes both halves.
+    s.clear_active();
+    assert!(!s.matches(&GoalId([0x99u8; 16])));
+}
+
+#[test]
+fn action_server_handles_includes_cancel_state() {
+    static H: micro_xrce_dds_rs::ActionServerHandles<Fib, 4, 4, 4> =
+        micro_xrce_dds_rs::ActionServerHandles::new();
+    // Default state: no active goal.
+    assert!(!H.cancel_state.is_cancel_requested());
+    assert!(!H.cancel_state.matches(&TEST_GOAL_ID));
+}
+
 // Tiny stand-in for std::vec since the dev-deps don't pull alloc.
 mod alloc_vec {
     pub struct Vec<T> {
