@@ -46,6 +46,77 @@ pub fn ros2_topic_name<const N: usize>(topic: &str) -> Result<HString<N>, Error>
     Ok(s)
 }
 
+// ── Service XML helpers ───────────────────────────────────────────────────────
+
+/// Strip the optional leading `/` from a ROS2 service path so it can be embedded
+/// in a Fast-DDS XML profile attribute.  `service_name` is read by Fast-DDS as
+/// an XML attribute; a leading `/` would survive into the auto-derived topic
+/// names and break the rq/rr convention.
+#[inline]
+pub fn ros2_service_attr_name(service: &str) -> &str {
+    service.strip_prefix('/').unwrap_or(service)
+}
+
+/// Build the `<dds><replier ...>` profile XML for a ROS2 service server.
+///
+/// Fast-DDS' `parseXMLReplierProf` expects `service_name`, `request_type` and
+/// `reply_type` as **XML attributes** on the `<replier>` element — putting them
+/// inside child elements (the legacy form) makes the parser reject the profile
+/// with `STATUS_ERR_DDS_ERROR (0x80)` from the agent.  Topic names are pinned
+/// explicitly to the ROS2 convention `rq/<name>Request` / `rr/<name>Reply`,
+/// because Fast-DDS' default would derive `<service_name>_Request` /
+/// `<service_name>_Reply` instead.
+pub fn ros2_replier_xml<const N: usize>(
+    service: &str,
+    request_type: &str,
+    reply_type: &str,
+) -> Result<HString<N>, Error> {
+    let stripped = ros2_service_attr_name(service);
+    let mut s = HString::<N>::new();
+    s.push_str("<dds><replier service_name=\"")
+        .and_then(|_| s.push_str(stripped))
+        .and_then(|_| s.push_str("\" request_type=\""))
+        .and_then(|_| s.push_str(request_type))
+        .and_then(|_| s.push_str("\" reply_type=\""))
+        .and_then(|_| s.push_str(reply_type))
+        .and_then(|_| s.push_str("\"><request_topic_name>rq/"))
+        .and_then(|_| s.push_str(stripped))
+        .and_then(|_| s.push_str("Request</request_topic_name><reply_topic_name>rr/"))
+        .and_then(|_| s.push_str(stripped))
+        .and_then(|_| s.push_str("Reply</reply_topic_name></replier></dds>"))
+        .map_err(|_| Error::BufferTooSmall)?;
+    Ok(s)
+}
+
+/// Build the `<dds><requester ...>` profile XML for a ROS2 service client.
+/// Same attribute/topic-name rules as [`ros2_replier_xml`].
+pub fn ros2_requester_xml<const N: usize>(
+    service: &str,
+    request_type: &str,
+    reply_type: &str,
+) -> Result<HString<N>, Error> {
+    let stripped = ros2_service_attr_name(service);
+    let mut s = HString::<N>::new();
+    s.push_str("<dds><requester service_name=\"")
+        .and_then(|_| s.push_str(stripped))
+        .and_then(|_| s.push_str("\" request_type=\""))
+        .and_then(|_| s.push_str(request_type))
+        .and_then(|_| s.push_str("\" reply_type=\""))
+        .and_then(|_| s.push_str(reply_type))
+        .and_then(|_| s.push_str("\"><request_topic_name>rq/"))
+        .and_then(|_| s.push_str(stripped))
+        .and_then(|_| s.push_str("Request</request_topic_name><reply_topic_name>rr/"))
+        .and_then(|_| s.push_str(stripped))
+        .and_then(|_| s.push_str("Reply</reply_topic_name></requester></dds>"))
+        .map_err(|_| Error::BufferTooSmall)?;
+    Ok(s)
+}
+
+/// Buffer size for service XML profiles — large enough to hold the longest
+/// realistic ROS2 service name + DDS type names with the attribute-form
+/// `<replier>` / `<requester>` envelope.
+pub const SERVICE_XML_MAX: usize = 512;
+
 // ── CREATE_CLIENT ─────────────────────────────────────────────────────────────
 
 /// Build a `CREATE_CLIENT` message into `buf`. Returns the number of bytes written.

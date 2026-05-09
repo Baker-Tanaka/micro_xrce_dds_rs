@@ -28,7 +28,8 @@ use crate::{
         creation::send_create_and_wait,
         encode::{
             encode_create_participant, encode_create_with_parent, encode_read_data,
-            ros2_topic_name, TOPIC_NAME_MAX,
+            ros2_replier_xml, ros2_requester_xml, ros2_topic_name, SERVICE_XML_MAX,
+            TOPIC_NAME_MAX,
         },
         inner::{Frame, FRAME_BUF_SIZE},
         Context,
@@ -296,15 +297,11 @@ impl Node {
         let requester_idx = inner.alloc_dr();
         let requester_oid = object_id(requester_idx, ENTITY_REQUESTER);
 
-        let mut xml = HString::<320>::new();
-        let _ = write!(
-            xml,
-            "<dds><requester><service_name>{}</service_name><request_type>{}</request_type><reply_type>{}</reply_type></requester></dds>",
+        let xml_snap = ros2_requester_xml::<SERVICE_XML_MAX>(
             S::SERVICE_NAME,
             S::REQUEST_TYPE_NAME,
             S::RESPONSE_TYPE_NAME,
-        );
-        let xml_snap = xml;
+        )?;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
                 buf, sid, seq, &key, req, requester_oid, ENTITY_REQUESTER,
@@ -353,15 +350,11 @@ impl Node {
         let replier_idx = inner.alloc_dr();
         let replier_oid = object_id(replier_idx, ENTITY_REPLIER);
 
-        let mut xml = HString::<320>::new();
-        let _ = write!(
-            xml,
-            "<dds><replier><service_name>{}</service_name><request_type>{}</request_type><reply_type>{}</reply_type></replier></dds>",
+        let xml_snap = ros2_replier_xml::<SERVICE_XML_MAX>(
             S::SERVICE_NAME,
             S::REQUEST_TYPE_NAME,
             S::RESPONSE_TYPE_NAME,
-        );
-        let xml_snap = xml;
+        )?;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
                 buf, sid, seq, &key, req, replier_oid, ENTITY_REPLIER,
