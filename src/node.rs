@@ -309,7 +309,7 @@ impl Node {
         })
         .await?;
 
-        // Register the slot for dispatch BEFORE returning so the executor
+        // Register the slot for dispatch BEFORE READ_DATA so the executor
         // can route any reply that arrives.
         handles.slot.set_requester_oid(requester_oid);
         inner
@@ -318,6 +318,20 @@ impl Node {
             .await
             .push(&handles.slot as &'static dyn SubscriptionSlot)
             .map_err(|_| Error::TooManySubscriptions)?;
+
+        // READ_DATA so the agent starts streaming reply DATA submessages back
+        // to this requester.  Without this the agent's internal reply
+        // DataReader is created but never put into "stream samples to the
+        // XRCE client" mode, so service-call replies never reach us.
+        let session_id = inner.session_id();
+        let client_key = inner.client_key();
+        let seq = inner.next_seq();
+        let req = inner.next_req();
+        let mut frame = Frame::zero();
+        let len = encode_read_data(&mut frame.bytes, session_id, seq, &client_key, req, requester_oid)?;
+        debug_assert!(len <= FRAME_BUF_SIZE);
+        frame.len = len;
+        inner.tx_channel.send(frame).await;
 
         Ok(ServiceClient::new(requester_oid, self.ctx, handles))
     }

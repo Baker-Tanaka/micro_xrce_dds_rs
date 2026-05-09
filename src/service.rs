@@ -169,9 +169,12 @@ impl<S: Service> SubscriptionSlot for ServiceClientSlot<S> {
         if self.pending_seq.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
-        // The agent forwards the raw CDR response bytes (no SampleIdentity prefix
-        // for requester replies — SampleIdentity is used only in replier WRITE_DATA).
-        let mut r = CdrReader::from_body(payload);
+        // The agent forwards the raw Fast-DDS SerializedPayload for REQUESTER
+        // replies, which includes the 4-byte CDR encapsulation header
+        // (`00 01 00 00`).  Regular topic DataReaders strip this header before
+        // forwarding, but `FastDDSRequester::read` does not — so use
+        // `CdrReader::new` (which skips the header) here, not `from_body`.
+        let mut r = CdrReader::new(payload);
         let resp = S::Response::deserialize(&mut r)?;
         self.inbox
             .try_send(resp)
