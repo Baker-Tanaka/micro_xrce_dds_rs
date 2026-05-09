@@ -16,12 +16,10 @@ macro_rules! error {
 /// Format: [payload_len: u16 LE] [payload: payload_len bytes]
 /// Matches the eProsima Micro XRCE-DDS Agent TCP transport framing.
 pub async fn write_framed<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), Error> {
-    debug!("[framing] tx {} bytes", payload.len());
     let len_bytes = (payload.len() as u16).to_le_bytes();
     write_all(writer, &len_bytes).await?;
     write_all(writer, payload).await?;
     writer.flush().await.map_err(|_| Error::Io)?;
-    debug!("[framing] tx flush OK");
     Ok(())
 }
 
