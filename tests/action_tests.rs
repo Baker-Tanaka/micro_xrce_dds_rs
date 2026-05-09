@@ -8,10 +8,10 @@
 
 use micro_xrce_dds_rs::{
     action::{
-        cancel_response, goal_status, Action, CancelGoalRequest, CancelGoalResponse,
-        CancelGoalSrv, FeedbackMessage, GetResultRequest, GetResultResponse, GetResultSrv,
-        GoalId, GoalInfo, GoalStatus, GoalStatusArray, SendGoalRequest, SendGoalResponse,
-        SendGoalResponseFor, SendGoalSrv, Time, MAX_CANCEL_GOALS, MAX_STATUS_GOALS,
+        cancel_response, goal_status, Action, CancelGoalRequest, CancelGoalResponse, CancelGoalSrv,
+        FeedbackMessage, GetResultRequest, GetResultResponse, GetResultSrv, GoalId, GoalInfo,
+        GoalStatus, GoalStatusArray, SendGoalRequest, SendGoalResponse, SendGoalResponseFor,
+        SendGoalSrv, Time, MAX_CANCEL_GOALS, MAX_STATUS_GOALS,
     },
     cdr::CdrWriter,
     cdr_reader::CdrReader,
@@ -584,10 +584,7 @@ fn goal_status_array_wire_shape() {
     list.push(GoalStatus {
         goal_info: GoalInfo {
             goal_id: GoalId([0xAA; 16]),
-            stamp: Time {
-                sec: 7,
-                nanosec: 8,
-            },
+            stamp: Time { sec: 7, nanosec: 8 },
         },
         status: goal_status::STATUS_EXECUTING,
     })

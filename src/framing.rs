@@ -1,12 +1,16 @@
-use embedded_io_async::{Read, Write};
 use crate::error::Error;
+use embedded_io_async::{Read, Write};
 
 #[cfg(feature = "defmt")]
 use defmt::{debug, error};
 #[cfg(not(feature = "defmt"))]
-macro_rules! debug { ($($t:tt)*) => {}; }
+macro_rules! debug {
+    ($($t:tt)*) => {};
+}
 #[cfg(not(feature = "defmt"))]
-macro_rules! error { ($($t:tt)*) => {}; }
+macro_rules! error {
+    ($($t:tt)*) => {};
+}
 
 /// Write a length-prefixed XRCE-DDS frame over TCP.
 /// Format: [payload_len: u16 LE] [payload: payload_len bytes]

@@ -20,6 +20,10 @@ use core::fmt::Write as _;
 use heapless::String as HString;
 
 use crate::{
+    action::{
+        Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
+        CancelGoalSrv, FeedbackMessage, GetResultSrv, GoalStatusArray, SendGoalSrv,
+    },
     error::Error,
     message::Message,
     protocol::*,
@@ -28,19 +32,12 @@ use crate::{
         creation::send_create_and_wait,
         encode::{
             encode_create_participant, encode_create_with_parent, encode_read_data,
-            ros2_replier_xml, ros2_requester_xml, ros2_topic_name, SERVICE_XML_MAX,
-            TOPIC_NAME_MAX,
+            ros2_replier_xml, ros2_requester_xml, ros2_topic_name, SERVICE_XML_MAX, TOPIC_NAME_MAX,
         },
         inner::{Frame, FRAME_BUF_SIZE},
         Context,
     },
-    action::{
-        Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
-        CancelGoalSrv, FeedbackMessage, GetResultSrv, GoalStatusArray, SendGoalSrv,
-    },
-    service::{
-        Service, ServiceClient, ServiceClientHandles, ServiceServer, ServiceServerSlot,
-    },
+    service::{Service, ServiceClient, ServiceClientHandles, ServiceServer, ServiceServerSlot},
     subscription::{Subscription, SubscriptionSlot},
 };
 
@@ -79,7 +76,16 @@ impl Context {
         );
         let xml_snap = xml; // copy so the closure can capture by value
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
-            encode_create_participant(buf, sid, seq, &key, req, participant_oid, xml_snap.as_str(), 0)
+            encode_create_participant(
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                participant_oid,
+                xml_snap.as_str(),
+                0,
+            )
         })
         .await?;
 
@@ -87,7 +93,13 @@ impl Context {
         let publisher_oid = object_id(publisher_idx, ENTITY_PUBLISHER);
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, publisher_oid, ENTITY_PUBLISHER,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                publisher_oid,
+                ENTITY_PUBLISHER,
                 "<dds><publisher><name>default</name></publisher></dds>",
                 participant_oid,
             )
@@ -98,7 +110,13 @@ impl Context {
         let subscriber_oid = object_id(subscriber_idx, ENTITY_SUBSCRIBER);
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, subscriber_oid, ENTITY_SUBSCRIBER,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                subscriber_oid,
+                ENTITY_SUBSCRIBER,
                 "<dds><subscriber><name>default</name></subscriber></dds>",
                 participant_oid,
             )
@@ -141,8 +159,15 @@ impl Node {
         let xml_snap = xml;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, topic_oid, ENTITY_TOPIC,
-                xml_snap.as_str(), participant_oid,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                topic_oid,
+                ENTITY_TOPIC,
+                xml_snap.as_str(),
+                participant_oid,
             )
         })
         .await?;
@@ -160,8 +185,15 @@ impl Node {
         let dw_xml_snap = dw_xml;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, dw_oid, ENTITY_DATAWRITER,
-                dw_xml_snap.as_str(), publisher_oid,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                dw_oid,
+                ENTITY_DATAWRITER,
+                dw_xml_snap.as_str(),
+                publisher_oid,
             )
         })
         .await?;
@@ -209,8 +241,15 @@ impl Node {
         let xml_snap = xml;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, topic_oid, ENTITY_TOPIC,
-                xml_snap.as_str(), participant_oid,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                topic_oid,
+                ENTITY_TOPIC,
+                xml_snap.as_str(),
+                participant_oid,
             )
         })
         .await?;
@@ -228,8 +267,15 @@ impl Node {
         let dr_xml_snap = dr_xml;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, dr_oid, ENTITY_DATAREADER,
-                dr_xml_snap.as_str(), subscriber_oid,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                dr_oid,
+                ENTITY_DATAREADER,
+                dr_xml_snap.as_str(),
+                subscriber_oid,
             )
         })
         .await?;
@@ -260,11 +306,7 @@ impl Node {
 
     /// Convenience wrapper: publish `msg` via a `Publisher` that belongs to
     /// this node.  Equivalent to `pub_.publish(msg)`.
-    pub async fn publish<M: Message>(
-        &self,
-        pub_: &Publisher<M>,
-        msg: &M,
-    ) -> Result<(), Error> {
+    pub async fn publish<M: Message>(&self, pub_: &Publisher<M>, msg: &M) -> Result<(), Error> {
         pub_.publish(msg).await
     }
 
@@ -303,8 +345,15 @@ impl Node {
         )?;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, requester_oid, ENTITY_REQUESTER,
-                xml_snap.as_str(), participant_oid,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                requester_oid,
+                ENTITY_REQUESTER,
+                xml_snap.as_str(),
+                participant_oid,
             )
         })
         .await?;
@@ -328,7 +377,14 @@ impl Node {
         let seq = inner.next_seq();
         let req = inner.next_req();
         let mut frame = Frame::zero();
-        let len = encode_read_data(&mut frame.bytes, session_id, seq, &client_key, req, requester_oid)?;
+        let len = encode_read_data(
+            &mut frame.bytes,
+            session_id,
+            seq,
+            &client_key,
+            req,
+            requester_oid,
+        )?;
         debug_assert!(len <= FRAME_BUF_SIZE);
         frame.len = len;
         inner.tx_channel.send(frame).await;
@@ -364,8 +420,15 @@ impl Node {
         )?;
         send_create_and_wait(inner, move |sid, key, seq, req, buf| {
             encode_create_with_parent(
-                buf, sid, seq, &key, req, replier_oid, ENTITY_REPLIER,
-                xml_snap.as_str(), participant_oid,
+                buf,
+                sid,
+                seq,
+                &key,
+                req,
+                replier_oid,
+                ENTITY_REPLIER,
+                xml_snap.as_str(),
+                participant_oid,
             )
         })
         .await?;
@@ -384,7 +447,14 @@ impl Node {
         let seq = inner.next_seq();
         let req = inner.next_req();
         let mut frame = Frame::zero();
-        let len = encode_read_data(&mut frame.bytes, session_id, seq, &client_key, req, replier_oid)?;
+        let len = encode_read_data(
+            &mut frame.bytes,
+            session_id,
+            seq,
+            &client_key,
+            req,
+            replier_oid,
+        )?;
         debug_assert!(len <= FRAME_BUF_SIZE);
         frame.len = len;
         inner.tx_channel.send(frame).await;
@@ -436,11 +506,8 @@ impl Node {
 
         // 4. feedback subscription — the create_subscription path performs its
         //    own CREATE_TOPIC + CREATE_DATAREADER + READ_DATA.
-        self.create_subscription::<FeedbackMessage<A>, FB_N>(
-            A::FEEDBACK_TOPIC_NAME,
-            feedback_slot,
-        )
-        .await?;
+        self.create_subscription::<FeedbackMessage<A>, FB_N>(A::FEEDBACK_TOPIC_NAME, feedback_slot)
+            .await?;
 
         let client_key = self.ctx.inner.client_key();
         let action_idx = send_goal_client.requester_oid();

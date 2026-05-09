@@ -92,9 +92,7 @@ impl<'a> CdrReader<'a> {
     /// Read a CDR `sequence<i32>` into a heapless `Vec` capped at `CAP`.
     /// Returns `Error::Deserialization` if the agent sent more elements than
     /// the local cap allows.
-    pub fn i32_seq_into<const CAP: usize>(
-        &mut self,
-    ) -> Result<heapless::Vec<i32, CAP>, Error> {
+    pub fn i32_seq_into<const CAP: usize>(&mut self) -> Result<heapless::Vec<i32, CAP>, Error> {
         let n = self.u32_val()? as usize;
         if n > CAP {
             return Err(Error::Deserialization);

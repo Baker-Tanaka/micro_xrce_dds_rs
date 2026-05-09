@@ -13,10 +13,8 @@
 //! These run on the host (x86_64) without a live transport.
 
 use micro_xrce_dds_rs::{
-    cdr::CdrWriter,
-    cdr_reader::CdrReader,
-    msg::std_msgs::Float32,
-    Message, SampleIdentity, Service, ServiceClientSlot, ServiceServerSlot, SubscriptionSlot,
+    cdr::CdrWriter, cdr_reader::CdrReader, msg::std_msgs::Float32, Message, SampleIdentity,
+    Service, ServiceClientSlot, ServiceServerSlot, SubscriptionSlot,
 };
 
 // ── Helper: a stub Service whose request/response are both Float32 ───────────
@@ -69,10 +67,7 @@ fn sample_identity_round_trip() {
     // The 16 GUID bytes are raw, then 8-aligned i64 (16 already 8-aligned),
     // so bytes [16..24] = sequence_number LE.
     assert_eq!(&buf[0..16], &id.writer_guid);
-    assert_eq!(
-        &buf[16..24],
-        &(0x1122_3344_5566_7788i64).to_le_bytes()
-    );
+    assert_eq!(&buf[16..24], &(0x1122_3344_5566_7788i64).to_le_bytes());
 
     let mut r = CdrReader::from_body(&buf[..n]);
     let id2 = SampleIdentity::deserialize(&mut r).unwrap();

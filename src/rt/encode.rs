@@ -12,7 +12,9 @@ use crate::{error::Error, protocol::*};
 #[cfg(feature = "defmt")]
 use defmt::error;
 #[cfg(not(feature = "defmt"))]
-macro_rules! error { ($($t:tt)*) => {}; }
+macro_rules! error {
+    ($($t:tt)*) => {};
+}
 
 // ── Public constants ──────────────────────────────────────────────────────────
 
@@ -264,10 +266,10 @@ pub fn encode_read_data(
     b.u8(FORMAT_DATA);
     b.u8(0); // optional_content_filter_expression = false
     b.u8(1); // optional_delivery_control = true
-    // DataDeliveryControl: 4 × u16 LE, CDR-aligned to 2.  Without this block
-    // the agent treats the read as one-shot and only the first matching
-    // sample is delivered; UNLIMITED tells it to stream all subsequent
-    // samples for the lifetime of the session.
+             // DataDeliveryControl: 4 × u16 LE, CDR-aligned to 2.  Without this block
+             // the agent treats the read as one-shot and only the first matching
+             // sample is delivered; UNLIMITED tells it to stream all subsequent
+             // samples for the lifetime of the session.
     b.cdr_u16(DELIVERY_UNLIMITED, origin); // max_samples
     b.cdr_u16(DELIVERY_UNLIMITED, origin); // max_elapsed_time
     b.cdr_u16(DELIVERY_UNLIMITED, origin); // max_bytes_per_seconds

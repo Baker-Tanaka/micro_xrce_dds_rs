@@ -36,17 +36,17 @@ pub mod rt;
 pub mod service;
 pub mod subscription;
 
-pub use error::Error;
-pub use message::Message;
-pub use node::Node;
-pub use publisher::Publisher;
-pub use rt::{Context, Executor, Runtime, RuntimeConfig};
 pub use action::{
     AcceptedGoal, Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
     ActiveGoalCancelState, CancelGoalRequest, CancelGoalResponse, CancelGoalSrv, FeedbackMessage,
     GetResultRequest, GetResultResponse, GetResultSrv, GoalHandle, GoalId, GoalInfo, GoalStatus,
     GoalStatusArray, SendGoalRequest, SendGoalResponse, SendGoalResponseFor, SendGoalSrv, Time,
 };
+pub use error::Error;
+pub use message::Message;
+pub use node::Node;
+pub use publisher::Publisher;
+pub use rt::{Context, Executor, Runtime, RuntimeConfig};
 pub use service::{
     SampleIdentity, Service, ServiceClient, ServiceClientHandles, ServiceClientSlot,
     ServiceRequest, ServiceServer, ServiceServerSlot,
@@ -92,11 +92,9 @@ pub const fn client_key_from_app_id(id: &str) -> [u8; 4] {
 #[macro_export]
 macro_rules! client_key {
     () => {
-        $crate::client_key_from_app_id(concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_BIN_NAME"),
-        ))
+        $crate::client_key_from_app_id(
+            concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_BIN_NAME"),),
+        )
     };
     ($id:expr) => {
         $crate::client_key_from_app_id($id)

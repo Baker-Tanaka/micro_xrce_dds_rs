@@ -8,9 +8,7 @@
 //! uses — without requiring a live TCP transport.
 
 use micro_xrce_dds_rs::{
-    cdr::CdrWriter,
-    msg::std_msgs::Float32,
-    Message, Subscription, SubscriptionSlot,
+    cdr::CdrWriter, msg::std_msgs::Float32, Message, Subscription, SubscriptionSlot,
 };
 
 // Static subscription slots — must be 'static for SubscriptionSlot dispatch.

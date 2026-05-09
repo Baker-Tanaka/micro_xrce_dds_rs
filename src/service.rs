@@ -489,4 +489,3 @@ macro_rules! service_server_slot {
             $crate::service::ServiceServerSlot::new();
     };
 }
-

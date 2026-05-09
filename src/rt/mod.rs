@@ -95,9 +95,7 @@ impl Runtime {
     /// Low-level helper for testing.  Prefer [`Runtime::start`] in application
     /// code.
     pub fn context(&'static self) -> Context {
-        Context {
-            inner: &self.inner,
-        }
+        Context { inner: &self.inner }
     }
 
     /// Connect to the micro-ROS Agent and return a `(Context, Executor)` pair.
@@ -119,14 +117,16 @@ impl Runtime {
         config: RuntimeConfig,
     ) -> Result<(Context, Executor<T>), Error> {
         let mut tx_buf = [0u8; 64];
-        let n = encode::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
+        let n =
+            encode::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
         framing::write_framed(&mut transport, &tx_buf[..n]).await?;
 
         let mut rx_buf = [0u8; 128];
         let reply = framing::read_framed(&mut transport, &mut rx_buf).await?;
         encode::parse_status_agent(reply, config.session_id)?;
 
-        self.inner.set_session_identity(config.session_id, config.client_key);
+        self.inner
+            .set_session_identity(config.session_id, config.client_key);
 
         let ctx = self.context();
         let exec = Executor::new(&self.inner, transport);
@@ -194,7 +194,8 @@ impl Runtime {
         config: RuntimeConfig,
     ) -> Result<Executor<T>, Error> {
         let mut tx_buf = [0u8; 64];
-        let n = encode::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
+        let n =
+            encode::build_create_client(&mut tx_buf, config.session_id, &config.client_key, 512);
         framing::write_framed(&mut transport, &tx_buf[..n]).await?;
 
         let mut rx_buf = [0u8; 128];
@@ -202,7 +203,8 @@ impl Runtime {
         encode::parse_status_agent(reply, config.session_id)?;
 
         // Confirm session identity is unchanged (resume contract).
-        self.inner.set_session_identity(config.session_id, config.client_key);
+        self.inner
+            .set_session_identity(config.session_id, config.client_key);
         // Drain any outgoing frames that were queued after the disconnect —
         // they refer to obsolete sequence numbers / headers.
         while self.inner.tx_channel.try_receive().is_ok() {}

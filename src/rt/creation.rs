@@ -3,7 +3,10 @@
 //! Holds `creation_lock` for the full round-trip so that at most one CREATE
 //! is in-flight at any given time (the agent processes them serially anyway).
 
-use crate::{error::Error, rt::inner::{Frame, SessionInner, FRAME_BUF_SIZE}};
+use crate::{
+    error::Error,
+    rt::inner::{Frame, SessionInner, FRAME_BUF_SIZE},
+};
 
 /// Send an XRCE-DDS CREATE_* request and wait for the STATUS reply.
 ///

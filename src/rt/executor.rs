@@ -8,16 +8,27 @@
 use embassy_futures::select::{select, Either};
 use embedded_io_async::{Read, Write};
 
-use crate::{error::Error, framing, protocol::*, rt::{encode::msg_header_len, inner::SessionInner}};
+use crate::{
+    error::Error,
+    framing,
+    protocol::*,
+    rt::{encode::msg_header_len, inner::SessionInner},
+};
 
 #[cfg(feature = "defmt")]
 use defmt::{debug, error, warn};
 #[cfg(not(feature = "defmt"))]
-macro_rules! debug { ($($t:tt)*) => {}; }
+macro_rules! debug {
+    ($($t:tt)*) => {};
+}
 #[cfg(not(feature = "defmt"))]
-macro_rules! error { ($($t:tt)*) => {}; }
+macro_rules! error {
+    ($($t:tt)*) => {};
+}
 #[cfg(not(feature = "defmt"))]
-macro_rules! warn { ($($t:tt)*) => {}; }
+macro_rules! warn {
+    ($($t:tt)*) => {};
+}
 
 // Must fit the largest incoming DATA frame (sensor_msgs/Imu body ~325 B +
 // headers).  512 matches FRAME_BUF_SIZE so the same stack slot covers both.
@@ -211,4 +222,3 @@ async fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> Result<(), Error>
     }
     Ok(())
 }
-
