@@ -5,11 +5,16 @@
 //! DataReader behind a single object_id; `WRITE_DATA(requester_oid, body)`
 //! sends a request and incoming `DATA(requester_oid, body)` carries the reply.
 //!
-//! Each ROS service body starts with a 24-byte `SampleIdentity` (16-byte writer
-//! GUID + 8-byte i64 sequence number) which the agent echoes from request to
-//! reply.  `ServiceClient::call` uses the sequence number to correlate replies
-//! to the right pending call; `ServiceRequest::reply` echoes it back so the
-//! original requester can match.
+//! **Wire protocol asymmetry (eProsima agent):**
+//! - Requests (`REQUESTER` → agent): raw CDR payload only.  The agent writes the
+//!   bytes directly to the DDS DataWriter and tracks correlation internally via
+//!   `sequence_to_sequence_` (Fast-DDS sequence number ↔ XRCE request_id).
+//! - Replies (agent → `REQUESTER`): raw CDR response from the DDS server.
+//! - Incoming requests (agent → `REPLIER`): 24-byte `SampleIdentity` prepended
+//!   before the CDR request payload so the server can echo it in the reply.
+//! - Replies (`REPLIER` → agent): 24-byte `SampleIdentity` (echoed from the
+//!   incoming request) prepended before the CDR response; the agent strips it and
+//!   puts it in `WriteParams.related_sample_identity`.
 //!
 //! ```ignore
 //! pub struct AddTwoInts;
@@ -160,13 +165,13 @@ impl<S: Service> SubscriptionSlot for ServiceClientSlot<S> {
     }
 
     fn try_deliver(&self, payload: &[u8]) -> Result<(), Error> {
-        let mut r = CdrReader::from_body(payload);
-        let id = SampleIdentity::deserialize(&mut r)?;
-        let pending = self.pending_seq.load(Ordering::Acquire);
-        if pending == 0 || id.sequence_number != pending {
-            // Stale / mismatched reply — drop silently.
+        // Drop if no call is in flight (pending_seq == 0).
+        if self.pending_seq.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
+        // The agent forwards the raw CDR response bytes (no SampleIdentity prefix
+        // for requester replies — SampleIdentity is used only in replier WRITE_DATA).
+        let mut r = CdrReader::from_body(payload);
         let resp = S::Response::deserialize(&mut r)?;
         self.inbox
             .try_send(resp)
@@ -182,7 +187,6 @@ impl<S: Service> SubscriptionSlot for ServiceClientSlot<S> {
 /// ```
 pub struct ServiceClientHandles<S: Service> {
     pub slot: ServiceClientSlot<S>,
-    pub seq: AtomicI64,
     pub call_lock: Mutex<CriticalSectionRawMutex, ()>,
 }
 
@@ -190,7 +194,6 @@ impl<S: Service> ServiceClientHandles<S> {
     pub const fn new() -> Self {
         Self {
             slot: ServiceClientSlot::new(),
-            seq: AtomicI64::new(0),
             call_lock: Mutex::new(()),
         }
     }
@@ -210,7 +213,6 @@ pub struct ServiceClient<S: Service> {
     requester_oid: u16,
     ctx: Context,
     handles: &'static ServiceClientHandles<S>,
-    writer_guid: [u8; 16],
 }
 
 impl<S: Service> Clone for ServiceClient<S> {
@@ -225,13 +227,11 @@ impl<S: Service> ServiceClient<S> {
         requester_oid: u16,
         ctx: Context,
         handles: &'static ServiceClientHandles<S>,
-        writer_guid: [u8; 16],
     ) -> Self {
         Self {
             requester_oid,
             ctx,
             handles,
-            writer_guid,
         }
     }
 
@@ -251,19 +251,11 @@ impl<S: Service> ServiceClient<S> {
         // Drain any stale reply leftover from a previous cancelled call.
         while self.handles.slot.inbox.try_receive().is_ok() {}
 
-        let seq = loop {
-            let prev = self.handles.seq.fetch_add(1, Ordering::Relaxed);
-            let n = prev.wrapping_add(1);
-            if n != 0 {
-                break n;
-            }
-        };
-        self.handles.slot.pending_seq.store(seq, Ordering::Release);
-
-        let identity = SampleIdentity {
-            writer_guid: self.writer_guid,
-            sequence_number: seq,
-        };
+        // Mark call as in-flight so try_deliver accepts incoming replies.
+        // The agent correlates request→reply internally (sequence_to_sequence_ map);
+        // we do not embed SampleIdentity in the CDR body — the agent writes the
+        // raw request bytes directly to the DDS DataWriter.
+        self.handles.slot.pending_seq.store(1, Ordering::Release);
 
         let session_id = inner.session_id();
         let prefix = msg_header_len(session_id) + 4 + 4;
@@ -271,7 +263,6 @@ impl<S: Service> ServiceClient<S> {
         let body_len = {
             let body = &mut frame.bytes[prefix..];
             let mut w = CdrWriter::new(body);
-            identity.serialize(&mut w);
             req.serialize(&mut w);
             w.bytes_written()
         };
@@ -496,15 +487,3 @@ macro_rules! service_server_slot {
     };
 }
 
-// ── Internal helper used by Node::create_service_client ──────────────────────
-
-/// Derive a stable 16-byte client GUID from `client_key + requester_oid`.
-/// Bit-pattern: `[ck0, ck1, ck2, ck3, oid_hi, oid_lo, 0,0,0,0, 'X','R','C','E','C','L']`.
-pub(crate) fn derive_writer_guid(client_key: &[u8; 4], requester_oid: u16) -> [u8; 16] {
-    let mut g = [0u8; 16];
-    g[0..4].copy_from_slice(client_key);
-    g[4] = (requester_oid >> 8) as u8;
-    g[5] = requester_oid as u8;
-    g[10..16].copy_from_slice(b"XRCECL");
-    g
-}

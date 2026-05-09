@@ -39,8 +39,7 @@ use crate::{
         CancelGoalSrv, FeedbackMessage, GetResultSrv, GoalStatusArray, SendGoalSrv,
     },
     service::{
-        derive_writer_guid, Service, ServiceClient, ServiceClientHandles, ServiceServer,
-        ServiceServerSlot,
+        Service, ServiceClient, ServiceClientHandles, ServiceServer, ServiceServerSlot,
     },
     subscription::{Subscription, SubscriptionSlot},
 };
@@ -320,13 +319,7 @@ impl Node {
             .push(&handles.slot as &'static dyn SubscriptionSlot)
             .map_err(|_| Error::TooManySubscriptions)?;
 
-        let writer_guid = derive_writer_guid(&inner.client_key(), requester_oid);
-        Ok(ServiceClient::new(
-            requester_oid,
-            self.ctx,
-            handles,
-            writer_guid,
-        ))
+        Ok(ServiceClient::new(requester_oid, self.ctx, handles))
     }
 
     /// Create a ROS2 service server for service `S`.  Allocates a `REPLIER`

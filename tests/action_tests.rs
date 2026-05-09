@@ -305,22 +305,11 @@ fn action_service_traits_wire_type_names() {
 fn action_client_handles_const_new() {
     static HANDLES: micro_xrce_dds_rs::ActionClientHandles<Fib> =
         micro_xrce_dds_rs::ActionClientHandles::new();
-    // Access all three inner state bundles to prove const-init reaches them.
-    assert_eq!(
-        HANDLES
-            .send_goal
-            .seq
-            .load(portable_atomic::Ordering::Relaxed),
-        0
-    );
-    assert_eq!(
-        HANDLES
-            .get_result
-            .seq
-            .load(portable_atomic::Ordering::Relaxed),
-        0
-    );
+    // Prove const-init compiles and the goal sequence counter starts at 0.
     assert_eq!(HANDLES.goal_seq.load(portable_atomic::Ordering::Relaxed), 0);
+    // Verify the inner service-client slots are reachable (field access).
+    let _ = &HANDLES.send_goal.slot;
+    let _ = &HANDLES.get_result.slot;
 }
 
 // ── Phase 2/3 — ActionClient / GoalHandle wiring ────────────────────────────

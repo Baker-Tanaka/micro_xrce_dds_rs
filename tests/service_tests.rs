@@ -2,8 +2,10 @@
 //!
 //! Verifies:
 //! - SampleIdentity CDR round-trip (24 bytes, alignment intact).
-//! - ServiceClientSlot routes a reply only when the SampleIdentity sequence
-//!   number matches the currently-pending call.
+//! - ServiceClientSlot routes a reply when a call is in-flight (pending_seq != 0)
+//!   and drops replies when no call is active.  The reply payload contains only
+//!   the raw CDR response bytes — no SampleIdentity prefix (the agent handles
+//!   request→reply correlation internally).
 //! - ServiceServerSlot delivers requests with their identity attached.
 //! - The `subscription_slot!` dispatch path can route by oid into a service
 //!   slot just like a regular subscription.
@@ -77,29 +79,40 @@ fn sample_identity_round_trip() {
     assert_eq!(id2, id);
 }
 
-// ── Test 2: ServiceClientSlot routes only when sequence matches ──────────────
+// ── Test 2: ServiceClientSlot routes by in-flight flag, not sequence ─────────
+//
+// The agent forwards reply payloads as raw CDR response bytes (no SampleIdentity
+// prefix).  Correlation is by the in-flight flag (pending_seq != 0) and the
+// call_lock which serialises concurrent calls to one at a time.
+
+fn client_reply_body(payload: f32) -> [u8; 4] {
+    let mut buf = [0u8; 4];
+    Float32(payload).serialize(&mut CdrWriter::new(&mut buf));
+    buf
+}
 
 #[test]
 fn service_client_slot_matches_sequence() {
     static SLOT: ServiceClientSlot<PingPong> = ServiceClientSlot::new();
     SLOT.set_requester_oid(0x0017); // (idx=1, kind=REQUESTER=7)
 
-    // Slot has no pending call yet → reply is silently dropped.
-    let body = service_body(42, 3.5);
-    assert!(SLOT.try_deliver(&body).is_ok());
+    // No pending call (pending_seq == 0) → reply is silently dropped.
+    let reply = client_reply_body(3.5);
+    assert!(SLOT.try_deliver(&reply).is_ok());
+    assert!(SLOT.try_recv_response().is_none());
 
-    // Arm the slot for sequence 42 (mimics ServiceClient::call in-flight).
-    SLOT.set_pending_seq(42);
+    // Arm the slot (mimics ServiceClient::call setting pending_seq = 1).
+    SLOT.set_pending_seq(1);
 
-    // A reply with sequence 7 → mismatch → still no inbox push.
-    let stale = service_body(7, 1.0);
-    assert!(SLOT.try_deliver(&stale).is_ok());
-
-    // Reply with sequence 42 → delivered.
-    let body = service_body(42, 3.5);
-    assert!(SLOT.try_deliver(&body).is_ok());
+    // Reply arrives → delivered (raw CDR, no SampleIdentity prefix).
+    assert!(SLOT.try_deliver(&reply).is_ok());
     let resp = SLOT.try_recv_response().unwrap();
     assert_eq!(resp.0, 3.5);
+    assert!(SLOT.try_recv_response().is_none());
+
+    // Disarm (mimics end of call).
+    SLOT.set_pending_seq(0);
+    assert!(SLOT.try_deliver(&reply).is_ok());
     assert!(SLOT.try_recv_response().is_none());
 }
 
