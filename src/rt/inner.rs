@@ -30,11 +30,12 @@ pub const TX_QUEUE_DEPTH: usize = 2;
 
 /// Byte capacity of one outgoing frame.
 ///
-/// Must fit the largest CREATE frame (topic XML ~200 B + headers ~30 B)
-/// and the largest WRITE_DATA frame (sensor_msgs/Imu body ~325 B + headers
-/// 12 B).  512 gives comfortable headroom and is identical to the legacy
-/// `TX_BUF_SIZE` in session.rs.
-pub const FRAME_BUF_SIZE: usize = 512;
+/// Must fit the largest CREATE frame (topic XML ~200 B + headers ~30 B) and
+/// the largest WRITE_DATA frame.  Bumped from 512 to 1024 so that
+/// `nav_msgs/Odometry` (~770 B with full 36-element pose/twist covariance)
+/// can publish in a single XRCE-DDS frame without fragmentation.
+/// Cost: TX channel static memory = `TX_QUEUE_DEPTH * FRAME_BUF_SIZE` bytes.
+pub const FRAME_BUF_SIZE: usize = 1024;
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
