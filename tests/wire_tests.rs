@@ -181,19 +181,23 @@ fn write_data_float32_wire_bytes() {
 // encode_read_data(buf, 0x81, seq=0, key, req_id=1,
 //   dr_oid=object_id(1,ENTITY_DATAREADER)=0x16)
 //
-// Derivation (16 bytes):
+// Derivation (24 bytes):
 //   [0]      0x81  session_id
 //   [1]      0x01  STREAM_BEST_EFFORT
 //   [2..4]   00 00  seq=0 LE
 //   [4]      0x08  SUBMSG_READ_DATA
 //   [5]      0x01  FLAG_LE
-//   [6..8]   08 00  payload_len=8 LE
+//   [6..8]   10 00  payload_len=16 LE
 //   [8..10]  00 01  req_id=1 BE
 //   [10..12] 00 16  dr_oid=0x0016 BE  (idx=1, DATAREADER=6)
 //   [12]     0x01  STREAM_BEST_EFFORT (delivery stream)
 //   [13]     0x00  FORMAT_DATA
 //   [14]     0x00  optional_content_filter_expression = false
-//   [15]     0x00  optional_delivery_control = false (continuous)
+//   [15]     0x01  optional_delivery_control = true
+//   [16..18] FF FF max_samples = UNLIMITED
+//   [18..20] FF FF max_elapsed_time = UNLIMITED
+//   [20..22] FF FF max_bytes_per_seconds = UNLIMITED
+//   [22..24] 00 00 min_pace_period = 0
 #[test]
 fn read_data_wire_bytes() {
     let dr_oid = object_id(1, ENTITY_DATAREADER);
@@ -201,17 +205,21 @@ fn read_data_wire_bytes() {
 
     let mut buf = [0u8; 64];
     let n = encode_read_data(&mut buf, SESSION_ID, 0, &CLIENT_KEY, 1, dr_oid).unwrap();
-    assert_eq!(n, 16);
+    assert_eq!(n, 24);
     #[rustfmt::skip]
-    let expected: [u8; 16] = [
+    let expected: [u8; 24] = [
         0x81, 0x01, 0x00, 0x00,  // session hdr
-        0x08, 0x01, 0x08, 0x00,  // READ_DATA: id=8, FLAG_LE, payload_len=8 LE
+        0x08, 0x01, 0x10, 0x00,  // READ_DATA: id=8, FLAG_LE, payload_len=16 LE
         0x00, 0x01,              // req_id=1 BE
         0x00, 0x16,              // dr_oid=0x0016 BE
-        0x01,                   // STREAM_BEST_EFFORT
-        0x00,                   // FORMAT_DATA
-        0x00,                   // optional_content_filter_expression = false
-        0x00,                   // optional_delivery_control = false
+        0x01,                    // STREAM_BEST_EFFORT
+        0x00,                    // FORMAT_DATA
+        0x00,                    // optional_content_filter_expression = false
+        0x01,                    // optional_delivery_control = true
+        0xFF, 0xFF,              // max_samples = UNLIMITED
+        0xFF, 0xFF,              // max_elapsed_time = UNLIMITED
+        0xFF, 0xFF,              // max_bytes_per_seconds = UNLIMITED
+        0x00, 0x00,              // min_pace_period = 0
     ];
     assert_eq!(&buf[..n], &expected[..]);
 }

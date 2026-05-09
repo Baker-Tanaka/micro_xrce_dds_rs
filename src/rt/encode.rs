@@ -164,6 +164,11 @@ pub fn encode_create_with_parent(
 
 // ── READ_DATA ─────────────────────────────────────────────────────────────────
 
+/// `max_samples` value indicating "no limit" — matches eProsima's
+/// `UXR_MAX_SAMPLES_UNLIMITED` (0xFFFF).  Same sentinel used for
+/// `max_elapsed_time` and `max_bytes_per_seconds`.
+const DELIVERY_UNLIMITED: u16 = 0xFFFF;
+
 pub fn encode_read_data(
     buf: &mut [u8],
     session_id: u8,
@@ -187,7 +192,15 @@ pub fn encode_read_data(
     b.u8(STREAM_BEST_EFFORT);
     b.u8(FORMAT_DATA);
     b.u8(0); // optional_content_filter_expression = false
-    b.u8(0); // optional_delivery_control = false (continuous)
+    b.u8(1); // optional_delivery_control = true
+    // DataDeliveryControl: 4 × u16 LE, CDR-aligned to 2.  Without this block
+    // the agent treats the read as one-shot and only the first matching
+    // sample is delivered; UNLIMITED tells it to stream all subsequent
+    // samples for the lifetime of the session.
+    b.cdr_u16(DELIVERY_UNLIMITED, origin); // max_samples
+    b.cdr_u16(DELIVERY_UNLIMITED, origin); // max_elapsed_time
+    b.cdr_u16(DELIVERY_UNLIMITED, origin); // max_bytes_per_seconds
+    b.cdr_u16(0, origin); // min_pace_period
 
     let payload_len = b.pos() - origin;
     b.patch_u16_at(hdr_off + 2, payload_len as u16);

@@ -11,9 +11,11 @@ use embedded_io_async::{Read, Write};
 use crate::{error::Error, framing, protocol::*, rt::{encode::msg_header_len, inner::SessionInner}};
 
 #[cfg(feature = "defmt")]
-use defmt::{debug, warn};
+use defmt::{debug, error, warn};
 #[cfg(not(feature = "defmt"))]
 macro_rules! debug { ($($t:tt)*) => {}; }
+#[cfg(not(feature = "defmt"))]
+macro_rules! error { ($($t:tt)*) => {}; }
 #[cfg(not(feature = "defmt"))]
 macro_rules! warn { ($($t:tt)*) => {}; }
 
@@ -79,7 +81,10 @@ impl<T: Read + Write> Executor<T> {
                 Either::Second(Ok(len)) => {
                     dispatch_frame(&self.rx_buf[..len], self.inner).await;
                 }
-                Either::Second(Err(_)) => break,
+                Either::Second(Err(e)) => {
+                    error!("[executor] rx error: {} — terminating loop", e);
+                    break;
+                }
             }
         }
 
@@ -92,45 +97,71 @@ impl<T: Read + Write> Executor<T> {
 
 // ── Frame dispatch ────────────────────────────────────────────────────────────
 
+/// Dispatch every submessage in one received XRCE-DDS message.
+///
+/// One TCP frame can carry multiple submessages back-to-back (the agent
+/// batches when several samples are ready at once).  Each submessage header
+/// sits at a 4-byte aligned offset within the message — after consuming a
+/// submessage, advance to the next 4-byte boundary before reading the next
+/// header.  Stopping at the first submessage silently drops every following
+/// sample in a batched frame.
 async fn dispatch_frame(msg: &[u8], inner: &'static SessionInner) {
     let session_id = inner.session_id();
     let hdr_len = msg_header_len(session_id);
-    if msg.len() < hdr_len + 4 {
-        return;
-    }
-    let submsg_id = msg[hdr_len];
-    let submsg_len = u16::from_le_bytes([msg[hdr_len + 2], msg[hdr_len + 3]]) as usize;
-    let payload_end = (hdr_len + 4 + submsg_len).min(msg.len());
-    let payload = &msg[hdr_len + 4..payload_end];
+    let mut pos = hdr_len;
 
-    match submsg_id {
-        SUBMSG_DATA => dispatch_data(payload, inner).await,
-        SUBMSG_STATUS => {
-            if let Some((req_id, result)) = parse_status(payload) {
-                inner.deliver_status(req_id, result);
+    while pos + 4 <= msg.len() {
+        let submsg_id = msg[pos];
+        let submsg_len = u16::from_le_bytes([msg[pos + 2], msg[pos + 3]]) as usize;
+        let payload_start = pos + 4;
+        let payload_end = (payload_start + submsg_len).min(msg.len());
+        let payload = &msg[payload_start..payload_end];
+
+        match submsg_id {
+            SUBMSG_DATA => dispatch_data(payload, inner).await,
+            SUBMSG_STATUS => {
+                if let Some((req_id, result)) = parse_status(payload) {
+                    inner.deliver_status(req_id, result);
+                }
+            }
+            SUBMSG_STATUS_AGENT => {
+                debug!("[executor] stray STATUS_AGENT ignored");
+            }
+            _ => {
+                debug!("[executor] ignoring submsg 0x{:02X}", submsg_id);
             }
         }
-        SUBMSG_STATUS_AGENT => {
-            debug!("[executor] stray STATUS_AGENT ignored");
-        }
-        _ => {
-            debug!("[executor] ignoring submsg 0x{:02X}", submsg_id);
+
+        // Submessage headers are 4-byte aligned within the message buffer.
+        pos = payload_end;
+        let rem = pos % 4;
+        if rem != 0 {
+            pos += 4 - rem;
         }
     }
 }
 
 async fn dispatch_data(payload: &[u8], inner: &'static SessionInner) {
     if payload.len() < 4 {
+        debug!("[executor] DATA payload too short ({})", payload.len());
         return;
     }
     // BaseObjectReply: req_id[2 BE] + obj_id[2 BE]
     let dr_oid = u16::from_be_bytes([payload[2], payload[3]]);
     let user_data = &payload[4..];
+    debug!(
+        "[executor] DATA dr_oid=0x{:04X} body_len={}",
+        dr_oid,
+        user_data.len()
+    );
     let subs = inner.subs.lock().await;
     for slot in subs.iter() {
         if slot.dr_id() == dr_oid {
             if slot.try_deliver(user_data).is_err() {
-                debug!("[executor] subscription overflow dr_oid=0x{:04X}", dr_oid);
+                warn!(
+                    "[executor] DATA dropped (overflow or decode error) dr_oid=0x{:04X}",
+                    dr_oid
+                );
             }
             return;
         }
