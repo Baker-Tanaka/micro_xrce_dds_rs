@@ -81,13 +81,21 @@ fn sample_identity_round_trip() {
 
 // ── Test 2: ServiceClientSlot routes by in-flight flag, not sequence ─────────
 //
-// The agent forwards reply payloads as raw CDR response bytes (no SampleIdentity
-// prefix).  Correlation is by the in-flight flag (pending_seq != 0) and the
+// The agent forwards reply payloads as the raw Fast-DDS SerializedPayload —
+// CDR encapsulation header (`00 01 00 00`) followed by the actual response
+// bytes.  Correlation is by the in-flight flag (pending_seq != 0) and the
 // call_lock which serialises concurrent calls to one at a time.
 
-fn client_reply_body(payload: f32) -> [u8; 4] {
-    let mut buf = [0u8; 4];
-    Float32(payload).serialize(&mut CdrWriter::new(&mut buf));
+fn client_reply_body(payload: f32) -> [u8; 8] {
+    let mut buf = [0u8; 8];
+    // CDR LE encapsulation header — agent forwards SerializedPayload as-is.
+    buf[..4].copy_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    let written = {
+        let mut w = CdrWriter::new(&mut buf[4..]);
+        Float32(payload).serialize(&mut w);
+        w.bytes_written()
+    };
+    assert_eq!(written, 4);
     buf
 }
 
