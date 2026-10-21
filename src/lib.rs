@@ -35,6 +35,8 @@ pub mod ros2;
 pub mod rt;
 pub mod service;
 pub mod subscription;
+pub mod time;
+pub mod transport;
 
 pub use action::{
     AcceptedGoal, Action, ActionClient, ActionClientHandles, ActionServer, ActionServerHandles,
@@ -52,6 +54,8 @@ pub use service::{
     ServiceRequest, ServiceServer, ServiceServerSlot,
 };
 pub use subscription::{Subscription, SubscriptionSlot};
+pub use time::Timestamp;
+pub use transport::Transport;
 
 /// Convenience re-export so users can write `msg::std_msgs::Float32`.
 pub use ros2::msg;

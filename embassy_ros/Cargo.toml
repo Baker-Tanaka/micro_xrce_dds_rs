@@ -1,0 +1,45 @@
+[package]
+name = "embassy-ros"
+version = "0.1.0"
+edition = "2021"
+description = "Static, no_std micro-ROS style node/topic framework for Embassy on top of micro-xrce-dds-rs"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "embassy_ros"
+
+[features]
+default = []
+defmt = [
+    "dep:defmt",
+    "micro-xrce-dds-rs/defmt",
+    "embassy-sync/defmt",
+    "embassy-time/defmt",
+    "embassy-net?/defmt",
+    "embassy-executor?/defmt",
+]
+# `transport::embassy_net` TCP Agent adapter.
+embassy-net = ["dep:embassy-net", "micro-xrce-dds-rs/embassy-net"]
+# `NodeSpawner` and the `#[embassy_ros::node]` task integration.
+executor = ["dep:embassy-executor"]
+
+[dependencies]
+micro-xrce-dds-rs = { path = "..", default-features = false }
+embassy-ros-macros = { path = "macros" }
+embassy-sync = "0.8"
+embassy-time = "0.5"
+embassy-futures = "0.1"
+embedded-io-async = "0.6"
+heapless = "0.8"
+defmt = { version = "1.0", optional = true }
+embassy-net = { version = "0.7", default-features = false, features = ["tcp", "proto-ipv4", "medium-ip"], optional = true }
+embassy-executor = { version = "0.10", optional = true }
+
+[dev-dependencies]
+critical-section = { version = "1", features = ["std"] }
+embassy-time = { version = "0.5", features = ["mock-driver", "generic-queue-8"] }
+embassy-executor = { version = "0.10", features = ["platform-std", "executor-thread"] }
+
+[[test]]
+name = "macro_node"
+required-features = ["executor"]

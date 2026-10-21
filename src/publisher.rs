@@ -51,7 +51,7 @@ impl<M: Message> Publisher<M> {
         let body_len = {
             let mut w = CdrWriter::new(&mut frame.bytes[prefix..]);
             msg.serialize(&mut w);
-            w.bytes_written()
+            w.finish_checked()?.len()
         };
         let total = prefix + body_len;
         if total > FRAME_BUF_SIZE {

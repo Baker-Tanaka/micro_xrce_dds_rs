@@ -44,6 +44,22 @@ impl<'a> CdrReader<'a> {
         Ok(self.u8_val()? != 0)
     }
 
+    pub fn i8_val(&mut self) -> Result<i8, Error> {
+        Ok(self.u8_val()? as i8)
+    }
+
+    pub fn u16_val(&mut self) -> Result<u16, Error> {
+        self.align(2);
+        let bytes = self.take(2)?;
+        Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
+    pub fn i16_val(&mut self) -> Result<i16, Error> {
+        self.align(2);
+        let bytes = self.take(2)?;
+        Ok(i16::from_le_bytes(bytes.try_into().unwrap()))
+    }
+
     pub fn i32_val(&mut self) -> Result<i32, Error> {
         self.align(4);
         let bytes = self.take(4)?;
@@ -82,6 +98,11 @@ impl<'a> CdrReader<'a> {
     pub fn bytes_array<const N: usize>(&mut self) -> Result<[u8; N], Error> {
         let bytes = self.take(N)?;
         Ok(bytes.try_into().unwrap())
+    }
+
+    /// Read `n` raw bytes with no alignment.
+    pub fn take_bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        self.take(n)
     }
 
     /// Align the cursor to `n` bytes.  Public for sequence-of-struct readers.
@@ -130,16 +151,32 @@ impl<'a> CdrReader<'a> {
     fn align(&mut self, n: usize) {
         let rem = self.pos % n;
         if rem != 0 {
-            self.pos += n - rem;
+            self.pos = self.pos.saturating_add(n - rem);
         }
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        if self.pos + n > self.buf.len() {
+        if self.pos > self.buf.len() || self.buf.len() - self.pos < n {
             return Err(Error::Deserialization);
         }
         let s = &self.buf[self.pos..self.pos + n];
         self.pos += n;
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_ints_and_bounds() {
+        let body = [0xFF, 0, 2, 1, 0xFE, 0xFF, 0xAA];
+        let mut r = CdrReader::from_body(&body);
+        assert_eq!(r.i8_val(), Ok(-1));
+        assert_eq!(r.u16_val(), Ok(0x0102));
+        assert_eq!(r.i16_val(), Ok(-2));
+        assert_eq!(r.u32_val(), Err(Error::Deserialization));
+        assert_eq!(r.take_bytes(usize::MAX), Err(Error::Deserialization));
     }
 }

@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>rosidl_generator_microxrcedds</name>
+  <version>0.1.0</version>
+  <description>Standalone bounded no_std Rust message generator for Micro XRCE-DDS.</description>
+  <maintainer email="dev@example.com">tenshi-no-hana</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <depend>rosidl_adapter</depend>
+  <depend>rosidl_parser</depend>
+  <depend>rosidl_cmake</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

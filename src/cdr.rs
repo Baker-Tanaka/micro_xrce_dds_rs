@@ -1,3 +1,5 @@
+use crate::error::Error;
+
 /// CDR Little Endian serializer for ROS2 DDS message *bodies* (field data only).
 ///
 /// **Do not** include the 4-byte CDR encapsulation header (`00 01 00 00`) when
@@ -11,14 +13,25 @@
 /// Alignment follows the CDR standard: each scalar is aligned to its own size,
 /// computed from byte 0 of the buffer (which is the start of the body when no
 /// encap header is written).
+///
+/// Writes never panic. If the buffer is too small, the writer latches an
+/// overflow flag, stops writing, and [`CdrWriter::finish_checked`] returns
+/// [`Error::BufferTooSmall`]. Callers that publish data must use
+/// `finish_checked`; the legacy [`CdrWriter::finish`] returns the (possibly
+/// truncated) prefix for compatibility only.
 pub struct CdrWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
+    overflow: bool,
 }
 
 impl<'a> CdrWriter<'a> {
     pub fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            buf,
+            pos: 0,
+            overflow: false,
+        }
     }
 
     /// Write the 4-byte CDR Little Endian encapsulation header.
@@ -32,6 +45,20 @@ impl<'a> CdrWriter<'a> {
 
     pub fn u8_val(&mut self, v: u8) {
         self.raw(&[v]);
+    }
+
+    pub fn i8_val(&mut self, v: i8) {
+        self.raw(&v.to_le_bytes());
+    }
+
+    pub fn u16_val(&mut self, v: u16) {
+        self.align(2);
+        self.raw(&v.to_le_bytes());
+    }
+
+    pub fn i16_val(&mut self, v: i16) {
+        self.align(2);
+        self.raw(&v.to_le_bytes());
     }
 
     pub fn u32_val(&mut self, v: u32) {
@@ -91,8 +118,15 @@ impl<'a> CdrWriter<'a> {
     /// CDR string: u32 length (including null terminator) + bytes + '\0'.
     /// The u32 length field is 4-byte aligned before writing.
     pub fn string(&mut self, s: &str) {
+        let len = match u32::try_from(s.len()).ok().and_then(|n| n.checked_add(1)) {
+            Some(len) => len,
+            None => {
+                self.overflow = true;
+                return;
+            }
+        };
         self.align(4);
-        self.raw(&((s.len() as u32 + 1).to_le_bytes()));
+        self.raw(&len.to_le_bytes());
         self.raw(s.as_bytes());
         self.raw(&[0x00]); // null terminator (no trailing pad — caller aligns next field)
     }
@@ -111,14 +145,29 @@ impl<'a> CdrWriter<'a> {
         }
     }
 
-    /// Number of bytes written (capped at buffer length).
+    /// Number of bytes successfully written.
     pub fn bytes_written(&self) -> usize {
-        self.pos.min(self.buf.len())
+        self.pos
     }
 
+    /// `true` once any write did not fit in the buffer.
+    pub fn overflowed(&self) -> bool {
+        self.overflow
+    }
+
+    /// Finish serialization, failing if any write did not fit.
+    pub fn finish_checked(self) -> Result<&'a [u8], Error> {
+        if self.overflow {
+            Err(Error::BufferTooSmall)
+        } else {
+            Ok(&self.buf[..self.pos])
+        }
+    }
+
+    /// Legacy unchecked finish: returns the bytes written so far, which are
+    /// truncated if [`CdrWriter::overflowed`] is `true`.
     pub fn finish(self) -> &'a [u8] {
-        let end = self.pos.min(self.buf.len());
-        &self.buf[..end]
+        &self.buf[..self.pos]
     }
 
     // ── internal helpers ────────────────────────────────────────────────────
@@ -126,20 +175,53 @@ impl<'a> CdrWriter<'a> {
     fn align(&mut self, n: usize) {
         let rem = self.pos % n;
         if rem != 0 {
-            let pad = n - rem;
-            for _ in 0..pad {
-                if self.pos < self.buf.len() {
-                    self.buf[self.pos] = 0;
-                }
-                self.pos += 1;
-            }
+            self.fill_zero(n - rem);
         }
     }
 
+    fn fill_zero(&mut self, n: usize) {
+        if self.overflow || self.buf.len() - self.pos < n {
+            self.overflow = true;
+            return;
+        }
+        self.buf[self.pos..self.pos + n].fill(0);
+        self.pos += n;
+    }
+
     fn raw(&mut self, bytes: &[u8]) {
-        let space = self.buf.len().saturating_sub(self.pos);
-        let n = bytes.len().min(space);
-        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+        if self.overflow || self.buf.len() - self.pos < bytes.len() {
+            self.overflow = true;
+            return;
+        }
+        self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
         self.pos += bytes.len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overflow_is_latched_without_panic() {
+        let mut buf = [0u8; 6];
+        let mut w = CdrWriter::new(&mut buf);
+        w.u8_val(1);
+        w.u32_val(7);
+        w.u32_val(8);
+        w.u8_val(9);
+        assert!(w.overflowed());
+        assert_eq!(w.bytes_written(), 4);
+        assert_eq!(w.finish_checked(), Err(Error::BufferTooSmall));
+    }
+
+    #[test]
+    fn small_ints_are_aligned() {
+        let mut buf = [0xFFu8; 8];
+        let mut w = CdrWriter::new(&mut buf);
+        w.i8_val(-1);
+        w.u16_val(0x0102);
+        w.i16_val(-2);
+        assert_eq!(w.finish_checked().unwrap(), &[0xFF, 0, 2, 1, 0xFE, 0xFF]);
     }
 }

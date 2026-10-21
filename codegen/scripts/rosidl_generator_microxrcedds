@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from rosidl_generator_microxrcedds.cli import main
+
+main()

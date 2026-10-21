@@ -50,7 +50,7 @@ const RX_BUF_SIZE: usize = 512;
 pub struct Executor<T> {
     inner: &'static SessionInner,
     transport: T,
-    rx_buf: [u8; RX_BUF_SIZE],
+    reader: framing::FrameReader<RX_BUF_SIZE>,
 }
 
 impl<T: Read + Write> Executor<T> {
@@ -58,51 +58,66 @@ impl<T: Read + Write> Executor<T> {
         Self {
             inner,
             transport,
-            rx_buf: [0u8; RX_BUF_SIZE],
+            reader: framing::FrameReader::new(),
         }
     }
 
     /// Run the executor loop forever.
     ///
-    /// Multiplexes outgoing frames from the TX queue and incoming frames from
-    /// the agent. On transport error: sets the disconnect flag, signals any
-    /// pending CREATE waiter with `Error::Disconnected`, then parks permanently
-    /// (v0.2 — reconnect is v0.5).
+    /// On transport error the session is marked disconnected and the task
+    /// parks. Use [`Executor::run_until_error`] to handle the error instead.
     pub async fn run(mut self) -> ! {
-        loop {
-            // Scope the mutable borrows of self.transport and self.rx_buf so
-            // the borrow checker sees them released before the match arms run.
-            let action = {
-                select(
-                    self.inner.tx_channel.receive(),
-                    read_one_frame(&mut self.transport, &mut self.rx_buf),
-                )
-                .await
+        let _ = self.run_until_error().await;
+        core::future::pending::<()>().await;
+        unreachable!()
+    }
+
+    /// Multiplex outgoing frames from the TX queue and incoming frames from
+    /// the agent until the transport fails, then mark the session
+    /// disconnected and return the error.
+    ///
+    /// Partial incoming frames survive `select` cancellation because the
+    /// reassembly state lives in the executor, not in the read future.
+    pub async fn run_until_error(&mut self) -> Error {
+        let err = loop {
+            let action = select(
+                self.inner.tx_channel.receive(),
+                self.reader.read_frame(&mut self.transport),
+            )
+            .await;
+            let action = match action {
+                Either::First(frame) => Either::First(frame),
+                Either::Second(r) => Either::Second(r.map(|_| ())),
             };
 
             match action {
                 Either::First(frame) => {
-                    if framing::write_framed(&mut self.transport, &frame.bytes[..frame.len])
-                        .await
-                        .is_err()
+                    if let Err(e) =
+                        framing::write_framed(&mut self.transport, &frame.bytes[..frame.len]).await
                     {
-                        break;
+                        break e;
                     }
                 }
-                Either::Second(Ok(len)) => {
-                    dispatch_frame(&self.rx_buf[..len], self.inner).await;
+                Either::Second(Ok(())) => {
+                    if let Some(msg) = self.reader.frame() {
+                        dispatch_frame(msg, self.inner).await;
+                    }
                 }
                 Either::Second(Err(e)) => {
                     error!("[executor] rx error: {} — terminating loop", e);
-                    break;
+                    break e;
                 }
             }
-        }
+        };
 
         self.inner.set_disconnected();
         self.inner.creation_signal.signal(Err(Error::Disconnected));
-        core::future::pending::<()>().await;
-        unreachable!()
+        err
+    }
+
+    /// Recover the transport (e.g. to abort/close it before reconnecting).
+    pub fn into_transport(self) -> T {
+        self.transport
     }
 }
 
@@ -181,44 +196,11 @@ async fn dispatch_data(payload: &[u8], inner: &'static SessionInner) {
 }
 
 fn parse_status(payload: &[u8]) -> Option<(u16, Result<(), Error>)> {
-    if payload.len() < 5 {
-        return None;
+    let (req_id, result) = crate::rt::encode::parse_status_payload(payload)?;
+    if let Some(STATUS_OK_MATCHED) = result.ok() {
+        warn!(
+            "[executor] STATUS_OK_MATCHED — stale entity reused; restart agent if subsequent CREATEs fail"
+        );
     }
-    let req_id = u16::from_be_bytes([payload[0], payload[1]]);
-    let status = payload[4];
-    let result = match status {
-        STATUS_OK => Ok(()),
-        STATUS_OK_MATCHED => {
-            warn!(
-                "[executor] STATUS_OK_MATCHED — stale entity reused; restart agent if subsequent CREATEs fail"
-            );
-            Ok(())
-        }
-        _ => Err(Error::AgentRejected(status)),
-    };
-    Some((req_id, result))
-}
-
-// ── Transport helpers ─────────────────────────────────────────────────────────
-
-async fn read_one_frame<T: Read>(transport: &mut T, rx_buf: &mut [u8]) -> Result<usize, Error> {
-    let mut len_buf = [0u8; 2];
-    read_exact(transport, &mut len_buf).await?;
-    let len = u16::from_le_bytes(len_buf) as usize;
-    if len > rx_buf.len() {
-        return Err(Error::BufferTooSmall);
-    }
-    read_exact(transport, &mut rx_buf[..len]).await?;
-    Ok(len)
-}
-
-async fn read_exact<R: Read>(r: &mut R, mut buf: &mut [u8]) -> Result<(), Error> {
-    while !buf.is_empty() {
-        match r.read(buf).await {
-            Err(_) => return Err(Error::Io),
-            Ok(0) => return Err(Error::Disconnected),
-            Ok(n) => buf = &mut buf[n..],
-        }
-    }
-    Ok(())
+    Some((req_id, result.map(|_| ())))
 }

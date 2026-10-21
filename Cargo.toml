@@ -7,7 +7,9 @@ license = "MIT OR Apache-2.0"
 
 [features]
 default = ["defmt"]
-defmt = ["dep:defmt", "embassy-sync/defmt"]
+defmt = ["dep:defmt", "embassy-sync/defmt", "embassy-net?/defmt"]
+# `Transport` adapter for `embassy_net::tcp::TcpSocket`.
+embassy-net = ["dep:embassy-net"]
 
 [dependencies]
 embedded-io-async = "0.6"
@@ -15,6 +17,7 @@ heapless = "0.8"
 embassy-sync = { version = "0.8" }
 embassy-futures = { version = "0.1" }
 defmt = { version = "1.0", optional = true }
+embassy-net = { version = "0.7", default-features = false, features = ["tcp", "proto-ipv4", "medium-ip"], optional = true }
 
 # On ARM bare-metal (Cortex-M0+ has no native atomic instructions):
 # use the software-fallback via unsafe-assume-single-core.

@@ -28,6 +28,8 @@ pub const SUBMSG_ACKNACK: u8 = 10;
 pub const SUBMSG_HEARTBEAT: u8 = 11;
 pub const SUBMSG_RESET: u8 = 12;
 pub const SUBMSG_FRAGMENT: u8 = 13;
+pub const SUBMSG_TIMESTAMP: u8 = 14;
+pub const SUBMSG_TIMESTAMP_REPLY: u8 = 15;
 
 // ── Submessage flags (submessage_internal.h: SubmessageFlags) ────────────────
 

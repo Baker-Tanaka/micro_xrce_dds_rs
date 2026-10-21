@@ -34,6 +34,17 @@ pub enum Error {
     /// `GoalHandle::await_result` finished with a non-`STATUS_SUCCEEDED`
     /// status code (carried as the wrapped value).
     GoalNotSucceeded(i8),
+    /// Invalid configuration or argument (bad session id, empty key, invalid
+    /// topic or node name, ...).
+    InvalidInput,
+    /// The runtime/framework, endpoint or connection was already started.
+    AlreadyStarted,
+    /// A received sample was older than its QoS maximum age.
+    StaleSample,
+    /// No free slot in a bounded framework table (nodes, endpoints, watchers).
+    CapacityExceeded,
+    /// A frame exceeded the receive buffer or carried an invalid length.
+    FrameTooLarge,
 }
 
 #[cfg(feature = "defmt")]
@@ -56,6 +67,11 @@ impl defmt::Format for Error {
             Error::NoServiceSlot => defmt::write!(f, "NoServiceSlot"),
             Error::GoalRejected => defmt::write!(f, "GoalRejected"),
             Error::GoalNotSucceeded(s) => defmt::write!(f, "GoalNotSucceeded({})", s),
+            Error::InvalidInput => defmt::write!(f, "InvalidInput"),
+            Error::AlreadyStarted => defmt::write!(f, "AlreadyStarted"),
+            Error::StaleSample => defmt::write!(f, "StaleSample"),
+            Error::CapacityExceeded => defmt::write!(f, "CapacityExceeded"),
+            Error::FrameTooLarge => defmt::write!(f, "FrameTooLarge"),
         }
     }
 }

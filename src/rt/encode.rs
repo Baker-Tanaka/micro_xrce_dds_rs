@@ -335,7 +335,7 @@ pub fn finalize_service_write_data(
 /// Returns `Ok(())` on success, `Err(UnexpectedReply)` if the message is
 /// malformed or not a STATUS_AGENT, `Err(AgentRejected(status))` if the
 /// agent replied with an error status.
-pub(crate) fn parse_status_agent(msg: &[u8], session_id: u8) -> Result<(), Error> {
+pub fn parse_status_agent(msg: &[u8], session_id: u8) -> Result<(), Error> {
     let hdr_len = msg_header_len(session_id);
     if msg.len() < hdr_len + 4 + 2 {
         error!("[rt] STATUS_AGENT too short: {}", msg.len());
@@ -352,6 +352,103 @@ pub(crate) fn parse_status_agent(msg: &[u8], session_id: u8) -> Result<(), Error
         return Err(Error::AgentRejected(status));
     }
     Ok(())
+}
+
+// ── STATUS parser ─────────────────────────────────────────────────────────────
+
+/// Parse a STATUS submessage payload (BaseObjectReply).
+///
+/// Returns `(request_id, Ok(status))` for `STATUS_OK`/`STATUS_OK_MATCHED`
+/// and `(request_id, Err(AgentRejected(status)))` otherwise.
+pub fn parse_status_payload(payload: &[u8]) -> Option<(u16, Result<u8, Error>)> {
+    if payload.len() < 5 {
+        return None;
+    }
+    let req_id = u16::from_be_bytes([payload[0], payload[1]]);
+    let status = payload[4];
+    let result = match status {
+        STATUS_OK | STATUS_OK_MATCHED => Ok(status),
+        _ => Err(Error::AgentRejected(status)),
+    };
+    Some((req_id, result))
+}
+
+// ── TIMESTAMP (time synchronization) ─────────────────────────────────────────
+
+/// Build a TIMESTAMP submessage carrying the client transmit time.
+///
+/// Sent on stream 0 / sequence 0 like eProsima's `uxr_sync_session`.
+pub fn encode_timestamp(
+    buf: &mut [u8],
+    session_id: u8,
+    client_key: &[u8; 4],
+    transmit: crate::time::Timestamp,
+) -> Result<usize, Error> {
+    let mut b = MsgWriter::new(buf);
+    write_session_header(&mut b, session_id, STREAM_NONE, 0, client_key);
+    b.align_buf(4);
+    b.u8(SUBMSG_TIMESTAMP);
+    b.u8(FLAG_LE);
+    b.u16_raw(8);
+    b.bytes(&transmit.sec.to_le_bytes());
+    b.bytes(&transmit.nanosec.to_le_bytes());
+    if b.overflow() {
+        return Err(Error::BufferTooSmall);
+    }
+    Ok(b.pos())
+}
+
+/// TIMESTAMP_REPLY payload: `(transmit, receive, originate)`.
+///
+/// `originate` echoes the client transmit time; `receive`/`transmit` are the
+/// agent clock when the request arrived / the reply left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimestampReply {
+    pub transmit: crate::time::Timestamp,
+    pub receive: crate::time::Timestamp,
+    pub originate: crate::time::Timestamp,
+}
+
+impl TimestampReply {
+    /// Agent-minus-client clock offset in nanoseconds, given the client time
+    /// `local_now` when the reply was received (NTP-style midpoint).
+    pub fn offset_nanos(&self, local_now: crate::time::Timestamp) -> i64 {
+        let t0 = self.originate.as_nanos() as i128;
+        let t1 = self.receive.as_nanos() as i128;
+        let t2 = self.transmit.as_nanos() as i128;
+        let t3 = local_now.as_nanos() as i128;
+        (((t1 + t2) - (t0 + t3)) / 2) as i64
+    }
+}
+
+/// Parse a TIMESTAMP_REPLY submessage payload. Integers follow the
+/// submessage endianness flag.
+pub fn parse_timestamp_reply(payload: &[u8], flags: u8) -> Option<TimestampReply> {
+    if payload.len() < 24 {
+        return None;
+    }
+    let le = flags & FLAG_LE != 0;
+    let word = |i: usize| {
+        let b = [payload[i], payload[i + 1], payload[i + 2], payload[i + 3]];
+        if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        }
+    };
+    let ts = |i: usize| crate::time::Timestamp::new(word(i) as i32, word(i + 4));
+    let reply = TimestampReply {
+        transmit: ts(0),
+        receive: ts(8),
+        originate: ts(16),
+    };
+    if reply.transmit.nanosec >= 1_000_000_000
+        || reply.receive.nanosec >= 1_000_000_000
+        || reply.originate.nanosec >= 1_000_000_000
+    {
+        return None;
+    }
+    Some(reply)
 }
 
 // ── Internal: session header ──────────────────────────────────────────────────

@@ -267,7 +267,13 @@ impl<S: Service> ServiceClient<S> {
             let body = &mut frame.bytes[prefix..];
             let mut w = CdrWriter::new(body);
             req.serialize(&mut w);
-            w.bytes_written()
+            match w.finish_checked() {
+                Ok(b) => b.len(),
+                Err(e) => {
+                    self.handles.slot.pending_seq.store(0, Ordering::Release);
+                    return Err(e);
+                }
+            }
         };
         let total = prefix + body_len;
         if total > FRAME_BUF_SIZE {
@@ -434,7 +440,7 @@ impl<S: Service> ServiceRequest<S> {
             let mut w = CdrWriter::new(body);
             self.identity.serialize(&mut w);
             resp.serialize(&mut w);
-            w.bytes_written()
+            w.finish_checked()?.len()
         };
         let total = prefix + body_len;
         if total > FRAME_BUF_SIZE {
