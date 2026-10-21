@@ -9,20 +9,24 @@ use super::validate;
 pub use super::{ConnectFailure, ConnectFailureKind, ConnectionTask, Driver};
 use crate::Context;
 
-/// TCP buffer size per direction.
-pub const TCP_BUFFER_SIZE: usize = 2048;
+/// TCP receive buffer size.
+pub const TCP_RX_BUFFER_SIZE: usize = 2048;
+/// TCP transmit buffer size. Frames are queued without waiting for ACKs, so
+/// this must cover the data rate times the round-trip time of a Wi-Fi link
+/// that may batch traffic for ~100 ms (power save).
+pub const TCP_TX_BUFFER_SIZE: usize = 8192;
 
 /// Static TCP socket buffers: `static B: StaticCell<TcpBuffers>`.
 pub struct TcpBuffers {
-    rx: [u8; TCP_BUFFER_SIZE],
-    tx: [u8; TCP_BUFFER_SIZE],
+    rx: [u8; TCP_RX_BUFFER_SIZE],
+    tx: [u8; TCP_TX_BUFFER_SIZE],
 }
 
 impl TcpBuffers {
     pub const fn new() -> Self {
         Self {
-            rx: [0; TCP_BUFFER_SIZE],
-            tx: [0; TCP_BUFFER_SIZE],
+            rx: [0; TCP_RX_BUFFER_SIZE],
+            tx: [0; TCP_TX_BUFFER_SIZE],
         }
     }
 

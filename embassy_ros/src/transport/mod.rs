@@ -13,11 +13,14 @@ pub mod embassy_net;
 
 use core::fmt::Write as _;
 
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::{
+    select::{select3, Either3},
+    yield_now,
+};
 use embassy_time::{with_deadline, Duration, Instant, Timer};
 use heapless::String;
 use micro_xrce_dds_rs::{
-    framing::{write_framed, FrameReader},
+    framing::{write_framed_unflushed, FrameReader},
     protocol::*,
     rt::encode::{
         build_create_client, encode_create_participant, encode_create_with_parent,
@@ -244,7 +247,7 @@ async fn send<T: Transport>(
 ) -> Result<(), Error> {
     match with_deadline(
         deadline,
-        write_framed(&mut driver.transport, &driver.tx[..len]),
+        write_framed_unflushed(&mut driver.transport, &driver.tx[..len]),
     )
     .await
     {
@@ -534,14 +537,19 @@ impl ConnectionTask {
         }
     }
 
+    /// Sends at most one queued message per publisher. Draining a publisher
+    /// completely would let a fast topic refill its queue while the slow link
+    /// sends, starving the other topics, Agent replies and the liveness check.
+    /// Returns whether anything was sent (more may be queued).
     async fn flush<T: Transport>(
         &self,
         driver: &mut Driver<T>,
         epoch: u32,
         timeout: Duration,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let (_, endpoints) = self.storage.counts();
         let prefix = msg_header_len(driver.session_id) + 8;
+        let mut sent = false;
         for j in 0..endpoints {
             let Some(entry) = self.storage.endpoint(j) else {
                 continue;
@@ -550,10 +558,11 @@ impl ConnectionTask {
                 continue;
             }
             let oid = object_id((j + 1) as u16, ENTITY_DATAWRITER);
-            while let Some(result) = entry
+            if let Some(result) = entry
                 .endpoint
                 .serialize_next(&mut driver.tx[prefix..], epoch)
             {
+                sent = true;
                 match result {
                     Ok(n) => {
                         let seq = driver.next_seq();
@@ -575,7 +584,7 @@ impl ConnectionTask {
                 }
             }
         }
-        Ok(())
+        Ok(sent)
     }
 
     fn dispatch(&self, frame: &[u8], session_id: u8, received_at: Instant, epoch: u32) {
@@ -611,13 +620,22 @@ impl ConnectionTask {
         let mut last_rx = Instant::now();
         let mut next_sync = last_rx + options.time_sync_interval;
         loop {
-            self.flush(driver, epoch, options.request_timeout).await?;
+            let sent = self.flush(driver, epoch, options.request_timeout).await?;
             let liveness_deadline = last_rx + options.liveness_timeout;
             let deadline = next_sync.min(liveness_deadline);
             let sid = driver.session_id;
+            // After a send more samples may already be queued; give the
+            // reader a turn, then flush again instead of sleeping.
+            let more = async {
+                if sent {
+                    yield_now().await;
+                } else {
+                    self.storage.tx.wait().await;
+                }
+            };
             match select3(
                 driver.reader.read_frame(&mut driver.transport),
-                self.storage.tx.wait(),
+                more,
                 Timer::at(deadline),
             )
             .await

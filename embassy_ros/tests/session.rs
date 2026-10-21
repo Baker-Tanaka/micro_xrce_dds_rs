@@ -349,3 +349,32 @@ fn frame_reader_survives_cancellation() {
     );
     assert_eq!(r.unwrap(), Err(Error::FrameTooLarge));
 }
+
+#[test]
+fn publishers_are_served_round_robin() {
+    let _l = lock();
+    static S: ContextStorage = ContextStorage::new();
+    static FAST: Topic<Cmd, 2> = Topic::new("/fast", Qos::sensor_data());
+    static SLOW: Topic<Cmd> = Topic::new("/slow", Qos::sensor_data());
+
+    let ctx = embassy_ros::init(&S, InitOptions::default()).unwrap();
+    let mut node = ctx.create_node("talker").unwrap();
+    let fast = node.publisher(&FAST).unwrap();
+    let slow = node.publisher(&SLOW).unwrap();
+    node.finish();
+    ctx.finish_registration().unwrap();
+
+    let mock = Mock::new(64);
+    let mut agent = FakeAgent::new(mock.clone());
+    let (task, mut driver) = connect_ok(ctx, &mock, &mut agent);
+
+    let mut run = pin!(task.run_with_driver(&mut driver));
+    fast.publish(&Cmd { v: 1 }).unwrap();
+    fast.publish(&Cmd { v: 2 }).unwrap();
+    slow.publish(&Cmd { v: 3 }).unwrap();
+    assert!(pump(run.as_mut(), &mut agent).is_none());
+
+    // A busy topic must not delay the other one until its queue is empty.
+    let order: Vec<u16> = agent.writes.iter().map(|w| w.0).collect();
+    assert_eq!(order, vec![0x15, 0x25, 0x15]);
+}
